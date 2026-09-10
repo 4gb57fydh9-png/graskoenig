@@ -1,0 +1,13 @@
+GRASKÖNIG V0.8.0 – MOBILE REDESIGN
+
+1. Öffne dein Projekt: C:\Users\Groebl\graskoenig
+2. Ersetze C:\Users\Groebl\graskoenig\lib\main.dart durch diese main.dart.
+3. Deine Kartenbilder bleiben in: C:\Users\Groebl\graskoenig\assets\cards\
+4. In pubspec.yaml muss unter flutter stehen:
+   assets:
+     - assets/cards/
+5. Danach im Projekt-Terminal:
+   flutter pub get
+   flutter run -d edge
+
+Für Handyansicht in Edge: F12, danach Strg+Shift+M.

@@ -1,6 +1,8 @@
 import 'dart:math';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 void main() {
   runApp(const GraskoenigApp());
@@ -8,6 +10,113 @@ void main() {
 
 const int handLimit = 5;
 const int maxTurnsPerPlayerPerRound = 6;
+
+const Color kBg = Color(0xFF03190F);
+const Color kPanel = Color(0xFF0A2518);
+const Color kPanel2 = Color(0xFF102F20);
+const Color kNeon = Color(0xFF42F35C);
+const Color kMint = Color(0xFF9CF0A7);
+const Color kGold = Color(0xFFFFC62E);
+const Color kCream = Color(0xFFF3E7CA);
+
+enum GameHaptic { selection, light, medium, heavy }
+
+class GameFeedback {
+  static bool soundEnabled = true;
+  static bool hapticsEnabled = true;
+  static bool musicEnabled = true;
+
+  static final AudioPlayer _player = AudioPlayer();
+  static final AudioPlayer _musicPlayer = AudioPlayer();
+  static bool menuMusicPlaying = false;
+
+  static Future<void> _haptic(GameHaptic kind) async {
+    if (!hapticsEnabled) return;
+
+    switch (kind) {
+      case GameHaptic.selection:
+        await HapticFeedback.selectionClick();
+        break;
+      case GameHaptic.light:
+        await HapticFeedback.lightImpact();
+        break;
+      case GameHaptic.medium:
+        await HapticFeedback.mediumImpact();
+        break;
+      case GameHaptic.heavy:
+        await HapticFeedback.heavyImpact();
+        break;
+    }
+  }
+
+  static Future<void> trigger(
+    String file, {
+    GameHaptic haptic = GameHaptic.light,
+  }) async {
+    await _haptic(haptic);
+
+    if (!soundEnabled) return;
+
+    try {
+      await _player.stop();
+      await _player.play(AssetSource('cards/$file'));
+    } catch (_) {
+      // Das Spiel soll auch dann weiterlaufen, wenn ein Browser oder Gerät
+      // einen Ton nicht abspielen kann.
+    }
+  }
+
+  static Future<void> selection() => _haptic(GameHaptic.selection);
+
+  static Future<void> preview() => trigger(
+        'sound_action.wav',
+        haptic: GameHaptic.medium,
+      );
+
+  static Future<void> startMenuMusic() async {
+    if (!musicEnabled || menuMusicPlaying) return;
+
+    try {
+      await _musicPlayer.setReleaseMode(ReleaseMode.loop);
+      await _musicPlayer.setVolume(0.18);
+      await _musicPlayer.play(
+        AssetSource('cards/sound_reggae_menu.wav'),
+      );
+      menuMusicPlaying = true;
+    } catch (_) {
+      // Browser können automatisches Audio vor dem ersten Nutzertipp blockieren.
+      menuMusicPlaying = false;
+    }
+  }
+
+  static Future<void> stopMenuMusic() async {
+    try {
+      await _musicPlayer.stop();
+    } catch (_) {}
+    menuMusicPlaying = false;
+  }
+
+  static Future<void> toggleMenuMusic() async {
+    if (menuMusicPlaying) {
+      await stopMenuMusic();
+    } else {
+      musicEnabled = true;
+      await startMenuMusic();
+    }
+  }
+}
+
+Color playerAccent(int index) {
+  const colors = <Color>[
+    Color(0xFF41E563),
+    Color(0xFFFF5B66),
+    Color(0xFF53A7FF),
+    Color(0xFFFFB52E),
+    Color(0xFFC86BFF),
+    Color(0xFF38D6C7),
+  ];
+  return colors[index % colors.length];
+}
 
 enum CardType { grass, energy, base, attack, defense, action }
 
@@ -17,6 +126,7 @@ class GameCard {
   final String value;
   final String effect;
   final int power;
+  final String? assetPath;
 
   const GameCard({
     required this.type,
@@ -24,77 +134,110 @@ class GameCard {
     required this.value,
     required this.effect,
     this.power = 0,
+    this.assetPath,
   });
 }
 
 GameCard grassCard(int power) {
   switch (power) {
     case 20:
-      return const GameCard(type: CardType.grass, title: 'Kleiner Beutel', value: '20 g', effect: 'Klein, aber fein.', power: 20);
+      return const GameCard(type: CardType.grass, title: 'Kleiner Beutel', value: '20 g', effect: 'Klein, aber fein.', power: 20, assetPath: 'assets/cards/gras20.jpg');
     case 50:
-      return const GameCard(type: CardType.grass, title: 'Solide Ernte', value: '50 g', effect: 'Es wird was.', power: 50);
+      return const GameCard(type: CardType.grass, title: 'Solide Ernte', value: '50 g', effect: 'Es wird was.', power: 50, assetPath: 'assets/cards/gras50.jpg');
     case 100:
-      return const GameCard(type: CardType.grass, title: 'Fette Ernte', value: '100 g', effect: 'Jetzt wird’s ernst.', power: 100);
+      return const GameCard(type: CardType.grass, title: 'Fette Ernte', value: '100 g', effect: 'Jetzt wird’s ernst.', power: 100, assetPath: 'assets/cards/gras100.jpg');
     default:
-      return const GameCard(type: CardType.grass, title: 'Maximum', value: '200 g', effect: 'Maximum.', power: 200);
+      return const GameCard(
+        type: CardType.grass,
+        title: 'Maximum',
+        value: '200 g',
+        effect: 'Maximum.',
+        power: 200,
+        assetPath: 'assets/cards/gras200.jpg',
+      );
   }
 }
 
 GameCard energyCard(int power) {
   switch (power) {
     case 25:
-      return const GameCard(type: CardType.energy, title: 'Notstrom', value: '25 %', effect: 'Ein bisschen reicht.', power: 25);
+      return const GameCard(type: CardType.energy, title: 'Notstrom', value: '25 %', effect: 'Ein bisschen reicht.', power: 25, assetPath: 'assets/cards/en25.jpg');
     case 50:
-      return const GameCard(type: CardType.energy, title: 'Kellerstrom', value: '50 %', effect: 'Läuft.', power: 50);
+      return const GameCard(type: CardType.energy, title: 'Kellerstrom', value: '50 %', effect: 'Läuft.', power: 50, assetPath: 'assets/cards/en50.jpg');
     case 75:
-      return const GameCard(type: CardType.energy, title: 'Grow Power', value: '75 %', effect: 'Schon ordentlich.', power: 75);
+      return const GameCard(type: CardType.energy, title: 'Grow Power', value: '75 %', effect: 'Schon ordentlich.', power: 75, assetPath: 'assets/cards/en75.jpg');
     default:
-      return const GameCard(type: CardType.energy, title: 'Volle Power', value: '100 %', effect: 'Volle Power.', power: 100);
+      return const GameCard(type: CardType.energy, title: 'Volle Power', value: '100 %', effect: 'Volle Power.', power: 100, assetPath: 'assets/cards/en100.jpg');
   }
 }
 
 List<GameCard> buildDeck() {
   final deck = <GameCard>[];
 
-  void addCards(int amount, CardType type, String title, String value, String effect, {int power = 0}) {
+  void addCards(
+    int amount,
+    CardType type,
+    String title,
+    String value,
+    String effect, {
+    int power = 0,
+    String? assetPath,
+  }) {
     for (int i = 0; i < amount; i++) {
-      deck.add(GameCard(type: type, title: title, value: value, effect: effect, power: power));
+      deck.add(
+        GameCard(
+          type: type,
+          title: title,
+          value: value,
+          effect: effect,
+          power: power,
+          assetPath: assetPath,
+        ),
+      );
     }
   }
 
-  addCards(4, CardType.grass, 'Kleiner Beutel', '20 g', 'Klein, aber fein.', power: 20);
-  addCards(5, CardType.grass, 'Solide Ernte', '50 g', 'Es wird was.', power: 50);
-  addCards(4, CardType.grass, 'Fette Ernte', '100 g', 'Jetzt wird’s ernst.', power: 100);
-  addCards(3, CardType.grass, 'Maximum', '200 g', 'Maximum.', power: 200);
+  addCards(4, CardType.grass, 'Kleiner Beutel', '20 g', 'Klein, aber fein.', power: 20, assetPath: 'assets/cards/gras20.jpg');
+  addCards(5, CardType.grass, 'Solide Ernte', '50 g', 'Es wird was.', power: 50, assetPath: 'assets/cards/gras50.jpg');
+  addCards(4, CardType.grass, 'Fette Ernte', '100 g', 'Jetzt wird’s ernst.', power: 100, assetPath: 'assets/cards/gras100.jpg');
+  addCards(
+    3,
+    CardType.grass,
+    'Maximum',
+    '200 g',
+    'Maximum.',
+    power: 200,
+    assetPath: 'assets/cards/gras200.jpg',
+  );
 
-  addCards(3, CardType.energy, 'Notstrom', '25 %', 'Ein bisschen reicht.', power: 25);
-  addCards(4, CardType.energy, 'Kellerstrom', '50 %', 'Läuft.', power: 50);
-  addCards(4, CardType.energy, 'Grow Power', '75 %', 'Schon ordentlich.', power: 75);
-  addCards(3, CardType.energy, 'Volle Power', '100 %', 'Volle Power.', power: 100);
+  addCards(3, CardType.energy, 'Notstrom', '25 %', 'Ein bisschen reicht.', power: 25, assetPath: 'assets/cards/en25.jpg');
+  addCards(4, CardType.energy, 'Kellerstrom', '50 %', 'Läuft.', power: 50, assetPath: 'assets/cards/en50.jpg');
+  addCards(4, CardType.energy, 'Grow Power', '75 %', 'Schon ordentlich.', power: 75, assetPath: 'assets/cards/en75.jpg');
+  addCards(3, CardType.energy, 'Volle Power', '100 %', 'Volle Power.', power: 100, assetPath: 'assets/cards/en100.jpg');
 
-  addCards(4, CardType.base, 'Kumpel um die Ecke', '×2', 'Regional. Loyal.', power: 2);
-  addCards(3, CardType.base, 'Dealer', '×3', 'Schnelle Verbindungen.', power: 3);
-  addCards(3, CardType.base, 'Growshop', '×3', 'Alles was du brauchst.', power: 3);
-  addCards(2, CardType.base, 'Graskönig', '×4', 'Das Nonplusultra.', power: 4);
+  addCards(4, CardType.base, 'Kumpel um die Ecke', '×2', 'Regional. Loyal.', power: 2, assetPath: 'assets/cards/basis2.jpg');
+  addCards(3, CardType.base, 'Dealer', '×3', 'Schnelle Verbindungen.', power: 3, assetPath: 'assets/cards/dealer.jpg');
+  addCards(3, CardType.base, 'Growshop', '×3', 'Alles was du brauchst.', power: 3, assetPath: 'assets/cards/growshop.jpg');
+  addCards(2, CardType.base, 'Graskönig', '×4', 'Das Nonplusultra.', power: 4, assetPath: 'assets/cards/graskoenig.jpg');
 
-  addCards(2, CardType.attack, 'Stromausfall', '💥', 'Energie eines Gegners −1 Stufe.');
-  addCards(2, CardType.attack, 'Energiediebstahl', '💥', 'Tausche deine Energie mit der eines Gegners.');
-  addCards(2, CardType.attack, 'Schädlingsbefall', '💥', 'Gras eines Gegners −1 Stufe.');
-  addCards(2, CardType.attack, 'Razzia', '💥', 'Ein Gegner legt 1 zufällige Handkarte ab.');
-  addCards(2, CardType.attack, 'Zu platt', '💥', 'Ein Gegner überspringt seinen nächsten Zug.');
+  addCards(2, CardType.attack, 'Stromausfall', '💥', 'Energie eines Gegners −1 Stufe.', assetPath: 'assets/cards/strom.jpg');
+  addCards(2, CardType.attack, 'Energiediebstahl', '💥', 'Tausche deine Energie mit der eines Gegners.', assetPath: 'assets/cards/energiedieb.jpg');
+  addCards(2, CardType.attack, 'Schädlingsbefall', '💥', 'Gras eines Gegners −1 Stufe.', assetPath: 'assets/cards/schaedling.jpg');
+  addCards(2, CardType.attack, 'Razzia', '💥', 'Ein Gegner legt 1 zufällige Handkarte ab.', assetPath: 'assets/cards/razzia.jpg');
+  addCards(2, CardType.attack, 'Zu platt', '💥', 'Ein Gegner überspringt seinen nächsten Zug.', assetPath: 'assets/cards/platt.jpg');
 
-  addCards(2, CardType.defense, 'Sicherungskasten', '🛡️', 'Stoppt Stromausfall.');
-  addCards(1, CardType.defense, 'Wachhund', '🛡️', 'Stoppt Energiediebstahl.');
-  addCards(1, CardType.defense, 'Schädlingsmittel', '🛡️', 'Stoppt Schädlingsbefall.');
-  addCards(2, CardType.defense, 'Anwalt', '🛡️', 'Stoppt Razzia oder Zu platt.');
-  addCards(2, CardType.defense, 'Alles easy', '🛡️', 'Stoppt jeden Angriff.');
+  addCards(2, CardType.defense, 'Sicherungskasten', '🛡️', 'Stoppt Stromausfall.', assetPath: 'assets/cards/sicherung.jpg');
+  addCards(1, CardType.defense, 'Wachhund', '🛡️', 'Stoppt Energiediebstahl.', assetPath: 'assets/cards/wachhund.jpg');
+  addCards(1, CardType.defense, 'Schädlingsmittel', '🛡️', 'Stoppt Schädlingsbefall.', assetPath: 'assets/cards/mittel.jpg');
+  addCards(2, CardType.defense, 'Anwalt', '🛡️', 'Stoppt Razzia oder Zu platt.', assetPath: 'assets/cards/anwalt.jpg');
+  addCards(2, CardType.defense, 'Alles easy', '🛡️', 'Stoppt jeden Angriff.', assetPath: 'assets/cards/easy.jpg');
 
-  addCards(3, CardType.action, 'Dünger', '★', 'Gras +1 Stufe.');
-  addCards(3, CardType.action, 'Gartenschere', '★', 'Ziehe 2 Karten, behalte 1.');
-  addCards(2, CardType.action, 'Übertopf', '★', 'Gras bis zu deinem nächsten Zug geschützt.');
-  addCards(2, CardType.action, 'Beste Freunde', '★', 'Tausche blind 1 Handkarte.');
-  addCards(2, CardType.action, 'Glückstreffer', '★', 'Ziehe 3 Karten, behalte 1.');
-  addCards(2, CardType.action, 'Ich zieh mir zwei', '★', 'Ziehe 2 Karten.');
+  addCards(3, CardType.action, 'Dünger', '★', 'Gras +1 Stufe.', assetPath: 'assets/cards/duenger.jpg');
+  addCards(3, CardType.action, 'Gartenschere', '★', 'Ziehe 2 Karten, behalte 1.', assetPath: 'assets/cards/schere.jpg');
+  addCards(2, CardType.action, 'Übertopf', '★', 'Gras bis zu deinem nächsten Zug geschützt.', assetPath: 'assets/cards/uebertopf.jpg');
+  addCards(2, CardType.action, 'Beste Freunde', '★', 'Tausche blind 1 Handkarte.', assetPath: 'assets/cards/freunde.jpg');
+  addCards(2, CardType.action, 'Glückstreffer', '★', 'Ziehe 3 Karten, behalte 1.', assetPath: 'assets/cards/glueck.jpg');
+  addCards(2, CardType.action, 'Ich zieh mir zwei', '★', 'Ziehe 2 Karten.', assetPath: 'assets/cards/zwei.jpg');
 
   return deck;
 }
@@ -109,8 +252,43 @@ class GraskoenigApp extends StatelessWidget {
       title: 'Graskönig',
       theme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF021D10),
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF147A3F), brightness: Brightness.dark),
+        scaffoldBackgroundColor: kBg,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: kNeon,
+          brightness: Brightness.dark,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xEE061A10),
+          foregroundColor: Colors.white,
+          elevation: 0,
+          centerTitle: true,
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: const Color(0xFF091E14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: const BorderSide(color: Color(0x5542F35C)),
+          ),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF16A638),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            textStyle: const TextStyle(fontWeight: FontWeight.w900),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.white,
+            side: const BorderSide(color: Colors.white38),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
         useMaterial3: true,
       ),
       home: const StartScreen(),
@@ -118,31 +296,365 @@ class GraskoenigApp extends StatelessWidget {
   }
 }
 
-class StartScreen extends StatelessWidget {
+class StartScreen extends StatefulWidget {
   const StartScreen({super.key});
+
+  @override
+  State<StartScreen> createState() => _StartScreenState();
+}
+
+class _StartScreenState extends State<StartScreen> {
+  Future<void> _openPage(Widget page) async {
+    await GameFeedback.stopMenuMusic();
+    if (!mounted) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => page),
+    );
+
+    if (!mounted) return;
+    await GameFeedback.startMenuMusic();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _comingSoon(BuildContext context, String title) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: const Text(
+          'Dieser Bereich ist für eine spätere Version vorgesehen. Das lokale Spiel funktioniert bereits vollständig.',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _toggleMusic() async {
+    await GameFeedback.toggleMenuMusic();
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text('👑', style: TextStyle(fontSize: 90)),
-            const SizedBox(height: 10),
-            const Text('GRASKÖNIG', style: TextStyle(fontSize: 48, fontWeight: FontWeight.w900)),
-            const SizedBox(height: 8),
-            const Text('GUTE FREUNDE. GUTER GROW.', style: TextStyle(color: Color(0xFF92EF65), letterSpacing: 2)),
-            const SizedBox(height: 60),
-            SizedBox(
-              width: 280,
-              height: 60,
-              child: FilledButton(
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PlayerSetupScreen())),
-                child: const Text('SPIEL STARTEN', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+      body: LeafBackground(
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: Stack(
+                children: [
+                  ListView(
+                    padding: const EdgeInsets.fromLTRB(18, 22, 18, 22),
+                    children: [
+                      const SizedBox(height: 8),
+
+                      Center(
+                        child: Container(
+                          width: 118,
+                          height: 172,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: kGold,
+                              width: 2.5,
+                            ),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0x66000000),
+                                blurRadius: 18,
+                                offset: Offset(0, 8),
+                              ),
+                              BoxShadow(
+                                color: Color(0x3342F35C),
+                                blurRadius: 18,
+                                spreadRadius: 2,
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(15),
+                            child: Image.asset(
+                              'assets/cards/graskoenig.jpg',
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => Container(
+                                color: kPanel,
+                                alignment: Alignment.center,
+                                child: const Text(
+                                  '👑',
+                                  style: TextStyle(fontSize: 74),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+                      const Text(
+                        'GRASKÖNIG',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 48,
+                          height: 0.95,
+                          fontWeight: FontWeight.w900,
+                          fontStyle: FontStyle.italic,
+                          letterSpacing: -1.5,
+                          shadows: [
+                            Shadow(
+                              color: Colors.black,
+                              blurRadius: 8,
+                              offset: Offset(2, 3),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'DAS KARTENSPIEL FÜR ERWACHSENE GENIESSER',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: kCream,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 1.1,
+                        ),
+                      ),
+                      const SizedBox(height: 28),
+
+                      MenuButton(
+                        icon: Icons.play_arrow_rounded,
+                        label: 'NEUES SPIEL',
+                        primary: true,
+                        onTap: () => _openPage(const PlayerSetupScreen()),
+                      ),
+                      const SizedBox(height: 9),
+                      MenuButton(
+                        icon: Icons.groups_2_outlined,
+                        label: 'SPIEL BEITRETEN',
+                        onTap: () => _comingSoon(context, 'Online-Spiel'),
+                      ),
+                      const SizedBox(height: 9),
+                      MenuButton(
+                        icon: Icons.menu_book_outlined,
+                        label: 'REGELN',
+                        onTap: () => _openPage(const RulesScreen()),
+                      ),
+                      const SizedBox(height: 9),
+                      MenuButton(
+                        icon: Icons.style_outlined,
+                        label: 'KARTENÜBERSICHT',
+                        onTap: () => _openPage(const CardsOverviewScreen()),
+                      ),
+                      const SizedBox(height: 9),
+                      MenuButton(
+                        icon: Icons.settings_outlined,
+                        label: 'EINSTELLUNGEN',
+                        onTap: () => _openPage(const SettingsScreen()),
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'GUTE FREUNDE\nGUTER GROW\nGAME ON!',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: kNeon,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          fontStyle: FontStyle.italic,
+                          height: 1.05,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'PROTOTYP • V0.9.8',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 10,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  Positioned(
+                    right: 8,
+                    top: 0,
+                    child: Material(
+                      color: const Color(0xD90A2518),
+                      borderRadius: BorderRadius.circular(22),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(22),
+                        onTap: _toggleMusic,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 11,
+                            vertical: 8,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                GameFeedback.menuMusicPlaying
+                                    ? Icons.music_note_rounded
+                                    : Icons.music_off_rounded,
+                                size: 18,
+                                color: GameFeedback.menuMusicPlaying
+                                    ? kNeon
+                                    : Colors.white54,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                GameFeedback.menuMusicPlaying
+                                    ? 'MUSIK AN'
+                                    : 'MUSIK STARTEN',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w900,
+                                  color: GameFeedback.menuMusicPlaying
+                                      ? kNeon
+                                      : Colors.white54,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-          ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('EINSTELLUNGEN'),
+      ),
+      body: LeafBackground(
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(18, 22, 18, 28),
+                children: [
+                  const Text(
+                    'SPIELGEFÜHL',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Hintergrundmusik, Spieltöne und Vibration kannst du jederzeit ein- oder ausschalten.',
+                    style: TextStyle(color: Colors.white60),
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xE80A2518),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: Colors.white12),
+                    ),
+                    child: Column(
+                      children: [
+                        SwitchListTile(
+                          secondary: const Icon(
+                            Icons.music_note_rounded,
+                            color: kGold,
+                          ),
+                          title: const Text(
+                            'HINTERGRUNDMUSIK',
+                            style: TextStyle(fontWeight: FontWeight.w900),
+                          ),
+                          subtitle: const Text(
+                            'Reggae-Musik im Hauptmenü',
+                          ),
+                          value: GameFeedback.musicEnabled,
+                          onChanged: (value) async {
+                            setState(() => GameFeedback.musicEnabled = value);
+                            if (!value) {
+                              await GameFeedback.stopMenuMusic();
+                            }
+                          },
+                        ),
+                        const Divider(height: 1, color: Colors.white12),
+                        SwitchListTile(
+                          secondary: const Icon(Icons.volume_up_rounded, color: kNeon),
+                          title: const Text(
+                            'TON',
+                            style: TextStyle(fontWeight: FontWeight.w900),
+                          ),
+                          subtitle: const Text('Kartenziehen, Angriff, Klopfen und Sieg'),
+                          value: GameFeedback.soundEnabled,
+                          onChanged: (value) {
+                            setState(() => GameFeedback.soundEnabled = value);
+                            if (value) GameFeedback.preview();
+                          },
+                        ),
+                        const Divider(height: 1, color: Colors.white12),
+                        SwitchListTile(
+                          secondary: const Icon(Icons.vibration_rounded, color: kGold),
+                          title: const Text(
+                            'VIBRATION',
+                            style: TextStyle(fontWeight: FontWeight.w900),
+                          ),
+                          subtitle: const Text('Haptisches Feedback auf Android und iPhone'),
+                          value: GameFeedback.hapticsEnabled,
+                          onChanged: (value) {
+                            setState(() => GameFeedback.hapticsEnabled = value);
+                            if (value) GameFeedback.selection();
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  SizedBox(
+                    height: 52,
+                    child: FilledButton.icon(
+                      onPressed: GameFeedback.preview,
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('TON & VIBRATION TESTEN'),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Hinweis: Vibration ist im Edge-Browser nicht spürbar. Sie funktioniert später auf dem echten Handy. Ton sollte auch im Browser hörbar sein.',
+                    style: TextStyle(
+                      color: Colors.white38,
+                      fontSize: 11,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -179,46 +691,350 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Neues Spiel')),
-      body: ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          const Text('Wie viele Spieler?', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
-          Wrap(
-            spacing: 10,
-            children: List.generate(5, (index) {
-              final number = index + 2;
-              return ChoiceChip(
-                label: Text('$number'),
-                selected: playerCount == number,
-                onSelected: (_) => setState(() => playerCount = number),
-              );
-            }),
-          ),
-          const SizedBox(height: 30),
-          ...List.generate(
-            playerCount,
-            (index) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: TextField(
-                controller: controllers[index],
-                decoration: InputDecoration(labelText: 'Spieler ${index + 1}', border: const OutlineInputBorder()),
+      appBar: AppBar(title: const Text('NEUES SPIEL')),
+      body: LeafBackground(
+        child: SafeArea(
+          top: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 18, 16, 28),
+                children: [
+                  SectionPanel(
+                    title: 'SPIELERANZAHL',
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: List.generate(5, (index) {
+                        final number = index + 2;
+                        final selected = playerCount == number;
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(30),
+                          onTap: () => setState(() => playerCount = number),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 160),
+                            width: 48,
+                            height: 48,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: selected ? const Color(0xFF174D24) : Colors.black26,
+                              border: Border.all(
+                                color: selected ? kNeon : Colors.white30,
+                                width: selected ? 2.5 : 1,
+                              ),
+                              boxShadow: selected
+                                  ? const [BoxShadow(color: Color(0x8842F35C), blurRadius: 12)]
+                                  : null,
+                            ),
+                            child: Text(
+                              '$number',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                                color: selected ? Colors.white : Colors.white70,
+                              ),
+                            ),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SectionPanel(
+                    title: 'SPIELER',
+                    child: Column(
+                      children: List.generate(playerCount, (index) {
+                        final color = playerAccent(index);
+                        return Padding(
+                          padding: EdgeInsets.only(bottom: index == playerCount - 1 ? 0 : 8),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.black26,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white12),
+                            ),
+                            child: Row(
+                              children: [
+                                const SizedBox(width: 10),
+                                CircleAvatar(
+                                  radius: 16,
+                                  backgroundColor: color,
+                                  child: const Icon(Icons.person, color: Colors.black87, size: 21),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: TextField(
+                                    controller: controllers[index],
+                                    style: const TextStyle(fontWeight: FontWeight.w700),
+                                    decoration: const InputDecoration(
+                                      border: InputBorder.none,
+                                      isDense: true,
+                                      contentPadding: EdgeInsets.symmetric(vertical: 14),
+                                    ),
+                                  ),
+                                ),
+                                const Icon(Icons.edit_outlined, color: kGold, size: 20),
+                                const SizedBox(width: 12),
+                              ],
+                            ),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const SectionPanel(
+                    title: 'SPIELMODUS',
+                    child: ModeRow(
+                      selected: true,
+                      title: 'Klassisch',
+                      subtitle: 'Aktuelle Graskönig-Regeln',
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  SizedBox(
+                    height: 58,
+                    child: FilledButton(
+                      onPressed: () {
+                        final players = List.generate(
+                          playerCount,
+                          (index) => controllers[index].text.trim().isEmpty
+                              ? 'Spieler ${index + 1}'
+                              : controllers[index].text.trim(),
+                        );
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => GameScreen(players: players)),
+                        );
+                      },
+                      child: const Text('SPIEL STARTEN', style: TextStyle(fontSize: 18)),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
-          const SizedBox(height: 25),
-          SizedBox(
-            height: 60,
-            child: FilledButton(
-              onPressed: () {
-                final players = List.generate(playerCount, (index) => controllers[index].text.trim());
-                Navigator.push(context, MaterialPageRoute(builder: (_) => GameScreen(players: players)));
-              },
-              child: const Text('KARTEN AUSTEILEN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ),
+      ),
+    );
+  }
+}
+
+class RulesScreen extends StatelessWidget {
+  const RulesScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('REGELN')),
+      body: LeafBackground(
+        child: SafeArea(
+          top: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(18),
+                    child: Image.asset(
+                      'assets/cards/rules.jpg',
+                      fit: BoxFit.fitWidth,
+                      errorBuilder: (_, __, ___) => const RulesFallback(),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const RulesFallback(),
+                ],
+              ),
             ),
           ),
-        ],
+        ),
+      ),
+    );
+  }
+}
+
+class RulesFallback extends StatelessWidget {
+  const RulesFallback({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const SectionPanel(
+      title: 'KURZREGELN',
+      child: Text(
+        '2–6 Spieler • 4 Runden • 5 Startkarten.\n\n'
+        'Zug: 1 Karte ziehen, höchstens 1 Karte spielen oder ablegen. '
+        'Die Plantage besteht aus Gras, Energie und Basis. '
+        'Punkte = Gras × Energie × Basis.\n\n'
+        'Ab dem 3. eigenen Zug darfst du mit vollständiger Plantage klopfen. '
+        'Danach erhalten die anderen Spieler je einen letzten Zug. '
+        'Der erfolgreiche Klopfer erhält +100 Punkte, wenn seine Plantage allein die beste ist.',
+        style: TextStyle(height: 1.45, color: Colors.white70),
+      ),
+    );
+  }
+}
+
+class CardsOverviewScreen extends StatefulWidget {
+  const CardsOverviewScreen({super.key});
+
+  @override
+  State<CardsOverviewScreen> createState() => _CardsOverviewScreenState();
+}
+
+class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
+  CardType? filter;
+
+  List<GameCard> get uniqueCards {
+    final map = <String, GameCard>{};
+    for (final card in buildDeck()) {
+      map['${card.type}-${card.title}-${card.value}'] = card;
+    }
+    return map.values.where((card) => filter == null || card.type == filter).toList();
+  }
+
+  String categoryName(CardType? type) {
+    if (type == null) return 'ALLE';
+    switch (type) {
+      case CardType.grass:
+        return 'GRAS';
+      case CardType.energy:
+        return 'ENERGIE';
+      case CardType.base:
+        return 'BASIS';
+      case CardType.attack:
+        return 'ANGRIFF';
+      case CardType.defense:
+        return 'ABWEHR';
+      case CardType.action:
+        return 'AKTION';
+    }
+  }
+
+  Future<void> showDetail(GameCard card) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: const Color(0xFF071B10),
+        insetPadding: const EdgeInsets.all(20),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 390, maxHeight: 720),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        card.title.toUpperCase(),
+                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                Flexible(
+                  child: AspectRatio(
+                    aspectRatio: 2 / 3,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: card.assetPath != null
+                          ? Image.asset(card.assetPath!, fit: BoxFit.contain)
+                          : CardFallbackLarge(card: card),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '${categoryName(card.type)} • ${card.value}',
+                  style: const TextStyle(color: kMint, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 6),
+                Text(card.effect, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cards = uniqueCards;
+    final filters = <CardType?>[null, ...CardType.values];
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('KARTENÜBERSICHT')),
+      body: LeafBackground(
+        child: SafeArea(
+          top: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: Column(
+                children: [
+                  SizedBox(
+                    height: 54,
+                    child: ListView.separated(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      scrollDirection: Axis.horizontal,
+                      itemCount: filters.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 7),
+                      itemBuilder: (_, index) {
+                        final type = filters[index];
+                        final selected = filter == type;
+                        return ChoiceChip(
+                          label: Text(categoryName(type)),
+                          selected: selected,
+                          onSelected: (_) => setState(() => filter = type),
+                          selectedColor: const Color(0xFF14642A),
+                          side: BorderSide(color: selected ? kNeon : Colors.white24),
+                        );
+                      },
+                    ),
+                  ),
+                  Expanded(
+                    child: GridView.builder(
+                      padding: const EdgeInsets.fromLTRB(12, 6, 12, 24),
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 2,
+                        childAspectRatio: 0.67,
+                        crossAxisSpacing: 10,
+                        mainAxisSpacing: 10,
+                      ),
+                      itemCount: cards.length,
+                      itemBuilder: (_, index) {
+                        final card = cards[index];
+                        return GestureDetector(
+                          onTap: () => showDetail(card),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(14),
+                            child: card.assetPath != null
+                                ? Image.asset(
+                                    card.assetPath!,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) => CardFallbackLarge(card: card),
+                                  )
+                                : CardFallbackLarge(card: card),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -353,6 +1169,32 @@ class _GameScreenState extends State<GameScreen> {
       hasDrawn = true;
       selectedCardIndex = null;
     });
+
+    GameFeedback.trigger(
+      'sound_draw.wav',
+      haptic: GameHaptic.light,
+    );
+  }
+
+  void drawDiscardCard() {
+    if (hasDrawn || turnFinished || discardPile.isEmpty) {
+      return;
+    }
+
+    final card = discardPile.removeLast();
+
+    setState(() {
+      hands[currentPlayer].add(card);
+      hasDrawn = true;
+      selectedCardIndex = null;
+    });
+
+    GameFeedback.trigger(
+      'sound_draw.wav',
+      haptic: GameHaptic.light,
+    );
+
+    showMessage('Du hast ${card.title} vom Ablagestapel genommen.');
   }
 
   // ==========================================================
@@ -364,6 +1206,7 @@ class _GameScreenState extends State<GameScreen> {
     setState(() {
       selectedCardIndex = selectedCardIndex == index ? null : index;
     });
+    GameFeedback.selection();
   }
 
   Future<void> playSelectedCard() async {
@@ -421,6 +1264,11 @@ class _GameScreenState extends State<GameScreen> {
       selectedCardIndex = null;
       turnFinished = true;
     });
+
+    GameFeedback.trigger(
+      'sound_play.wav',
+      haptic: GameHaptic.medium,
+    );
   }
 
   // ==========================================================
@@ -457,6 +1305,7 @@ class _GameScreenState extends State<GameScreen> {
           turnFinished = true;
         });
 
+        GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
         showMessage('🌱 Dünger: Dein Gras steigt auf $newPower g.');
         return;
 
@@ -472,6 +1321,7 @@ class _GameScreenState extends State<GameScreen> {
           turnFinished = true;
         });
 
+        GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
         showMessage('🪴 Übertopf: Dein Gras ist bis zu deinem nächsten eigenen Zug geschützt.');
         return;
 
@@ -518,6 +1368,7 @@ class _GameScreenState extends State<GameScreen> {
           turnFinished = true;
         });
 
+        GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
         showMessage('🤝 Beste Freunde: Ihr habt blind je eine Handkarte getauscht.');
         return;
 
@@ -559,7 +1410,8 @@ class _GameScreenState extends State<GameScreen> {
         await enforceHandLimit();
 
         if (mounted) {
-          showMessage('✂️ Gartenschere: Du hast 2 gezogen und 1 behalten.');
+          GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
+        showMessage('✂️ Gartenschere: Du hast 2 gezogen und 1 behalten.');
         }
         return;
 
@@ -600,7 +1452,8 @@ class _GameScreenState extends State<GameScreen> {
         await enforceHandLimit();
 
         if (mounted) {
-          showMessage('🍀 Glückstreffer: Du hast 3 gezogen und 1 behalten.');
+          GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
+        showMessage('🍀 Glückstreffer: Du hast 3 gezogen und 1 behalten.');
         }
         return;
 
@@ -621,7 +1474,8 @@ class _GameScreenState extends State<GameScreen> {
         await enforceHandLimit();
 
         if (mounted) {
-          showMessage('😎 Ich zieh mir zwei: ${drawn.length} zusätzliche Karten gezogen.');
+          GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
+        showMessage('😎 Ich zieh mir zwei: ${drawn.length} zusätzliche Karten gezogen.');
         }
         return;
 
@@ -675,7 +1529,7 @@ class _GameScreenState extends State<GameScreen> {
         barrierDismissible: false,
         builder: (context) {
           return AlertDialog(
-            title: const Text('Handkartenlimit: 7'),
+            title: const Text('Handkartenlimit: 5'),
             content: SizedBox(
               width: 420,
               child: Column(
@@ -735,6 +1589,10 @@ class _GameScreenState extends State<GameScreen> {
         turnFinished = true;
       });
 
+      GameFeedback.trigger(
+        'sound_defend.wav',
+        haptic: GameHaptic.heavy,
+      );
       showMessage('${widget.players[target]} wehrt ${attack.title} mit ${defense.title} ab!');
       return;
     }
@@ -749,6 +1607,10 @@ class _GameScreenState extends State<GameScreen> {
       turnFinished = true;
     });
 
+    GameFeedback.trigger(
+      'sound_attack.wav',
+      haptic: GameHaptic.heavy,
+    );
     showMessage(resultMessage);
   }
 
@@ -817,7 +1679,21 @@ class _GameScreenState extends State<GameScreen> {
       barrierDismissible: false,
       builder: (context) {
         return AlertDialog(
-          title: Text('${widget.players[player]} wird angegriffen!'),
+          title: PulseScale(
+            active: true,
+            minScale: 1.0,
+            maxScale: 1.025,
+            duration: const Duration(milliseconds: 480),
+            child: Row(
+              children: [
+                const Text('💥', style: TextStyle(fontSize: 24)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('${widget.players[player]} wird angegriffen!'),
+                ),
+              ],
+            ),
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -914,6 +1790,11 @@ class _GameScreenState extends State<GameScreen> {
       selectedCardIndex = null;
       turnFinished = true;
     });
+
+    GameFeedback.trigger(
+      'sound_play.wav',
+      haptic: GameHaptic.light,
+    );
   }
 
   bool automaticRoundEndReached() {
@@ -990,6 +1871,10 @@ class _GameScreenState extends State<GameScreen> {
         );
     });
 
+    GameFeedback.trigger(
+      'sound_knock.wav',
+      haptic: GameHaptic.heavy,
+    );
     showMessage('${widget.players[currentPlayer]} hat geklopft!');
     await moveToNextFinalPlayer();
   }
@@ -1131,6 +2016,11 @@ class _GameScreenState extends State<GameScreen> {
 
     roundEnding = true;
 
+    GameFeedback.trigger(
+      'sound_round.wav',
+      haptic: GameHaptic.medium,
+    );
+
     final rawScores = List<int>.generate(
       widget.players.length,
       (i) => calculatePoints(i),
@@ -1223,6 +2113,10 @@ class _GameScreenState extends State<GameScreen> {
     if (!mounted) return;
 
     if (roundNumber >= 4) {
+      GameFeedback.trigger(
+        'sound_win.wav',
+        haptic: GameHaptic.heavy,
+      );
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
@@ -1240,6 +2134,224 @@ class _GameScreenState extends State<GameScreen> {
       roundNumber++;
       startRound();
     });
+  }
+
+  Future<void> showCardZoom(GameCard card) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return Dialog(
+          backgroundColor: const Color(0xFF071B10),
+          insetPadding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 430, maxHeight: 720),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          card.title.toUpperCase(),
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Flexible(
+                    child: InteractiveViewer(
+                      minScale: 1,
+                      maxScale: 3,
+                      child: AspectRatio(
+                        aspectRatio: 2 / 3,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(18),
+                          child: card.assetPath != null
+                              ? Image.asset(
+                                  card.assetPath!,
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (_, __, ___) => CardFallbackLarge(card: card),
+                                )
+                              : CardFallbackLarge(card: card),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    '${card.value}  •  ${card.effect}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Tipp: Im großen Bild kannst du mit der Maus bzw. mit zwei Fingern zoomen.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 11, color: Colors.white38),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void showPlayerPlantation(int player) {
+    final points = calculatePoints(player);
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF091E14),
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: playerAccent(player),
+                      child: player == currentPlayer
+                          ? const Text('👑', style: TextStyle(fontSize: 16))
+                          : const Icon(
+                              Icons.person,
+                              color: Colors.black87,
+                              size: 20,
+                            ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        widget.players[player],
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '$points P',
+                      style: const TextStyle(
+                        color: kGold,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Offene Plantage – Handkarten bleiben geheim',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 10,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: PlantSlot(
+                        icon: '🌿',
+                        title: 'GRAS',
+                        card: grassSlots[player],
+                        protected: grassProtected[player],
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: PlantSlot(
+                        icon: '⚡',
+                        title: 'ENERGIE',
+                        card: energySlots[player],
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: PlantSlot(
+                        icon: '👑',
+                        title: 'BASIS',
+                        card: baseSlots[player],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () => Navigator.pop(sheetContext),
+                    child: const Text('SCHLIESSEN'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ==========================================================
+  // SPIEL AUFGEBEN
+  // ==========================================================
+
+  Future<void> confirmGiveUp() async {
+    final giveUp = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF0B2117),
+          title: const Row(
+            children: [
+              Icon(Icons.flag_outlined, color: Color(0xFFFF6B6B)),
+              SizedBox(width: 10),
+              Text('SPIEL AUFGEBEN?'),
+            ],
+          ),
+          content: const Text(
+            'Das aktuelle Spiel wird beendet und du kehrst zum Hauptmenü zurück. '
+            'Der aktuelle Spielstand dieser Partie geht verloren.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('WEITERSPIELEN'),
+            ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFB3261E),
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              icon: const Icon(Icons.flag_rounded),
+              label: const Text('AUFGEBEN'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (giveUp == true && mounted) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
   }
 
   // ==========================================================
@@ -1266,224 +2378,474 @@ class _GameScreenState extends State<GameScreen> {
     final points = calculatePoints(currentPlayer);
     final complete = plantationComplete(currentPlayer);
     final knockReady = canKnock();
+    final topDiscard = discardPile.isEmpty ? null : discardPile.last;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Graskönig – Runde $roundNumber/4 • V0.6.4'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
+        leading: IconButton(
+          icon: const Icon(Icons.menu_rounded),
+          onPressed: () {
+            showModalBottomSheet<void>(
+              context: context,
+              backgroundColor: const Color(0xFF091E14),
+              builder: (_) => SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.menu_book_outlined),
+                        title: const Text('Regeln ansehen'),
+                        onTap: () {
+                          Navigator.pop(context);
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => const RulesScreen()));
+                        },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.style_outlined),
+                        title: const Text('Kartenübersicht'),
+                        onTap: () {
+                          Navigator.pop(context);
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => const CardsOverviewScreen()));
+                        },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.settings_outlined),
+                        title: const Text('Ton & Vibration'),
+                        onTap: () {
+                          Navigator.pop(context);
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                          );
+                        },
+                      ),
+                      const Divider(color: Colors.white12),
+                      ListTile(
+                        leading: const Icon(
+                          Icons.flag_outlined,
+                          color: Color(0xFFFF6B6B),
+                        ),
+                        title: const Text(
+                          'Spiel aufgeben',
+                          style: TextStyle(
+                            color: Color(0xFFFF8A80),
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        subtitle: const Text(
+                          'Zurück zum Hauptmenü',
+                          style: TextStyle(color: Colors.white54),
+                        ),
+                        onTap: () {
+                          Navigator.pop(context);
+                          Future.delayed(
+                            Duration.zero,
+                            confirmGiveUp,
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+        title: Column(
           children: [
-            if (knockActive)
-              Container(
-                width: double.infinity,
-                margin: const EdgeInsets.only(bottom: 12),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF6B4A00),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  '👊 ${widget.players[knockingPlayer!]} hat geklopft – letzter Zug für die übrigen Spieler!',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  '${widget.players[currentPlayer]} ist am Zug',
-                  style: const TextStyle(fontSize: 25, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(width: 12),
-                Chip(label: Text('Gesamt ${totalScores[currentPlayer]} P')),
-              ],
-            ),
-
-            const SizedBox(height: 4),
             Text(
-              '${deck.length} Karten im Stapel • eigener Zug ${completedTurns[currentPlayer] + 1}',
-              style: const TextStyle(color: Colors.white54),
+              'RUNDE $roundNumber/4',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
             ),
-
-            const SizedBox(height: 12),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                SizedBox(
-                  width: 190,
-                  height: 45,
-                  child: FilledButton.icon(
-                    // Der Button bleibt immer sichtbar und anklickbar.
-                    // Falls Klopfen noch nicht erlaubt ist, erklärt knock() warum.
-                    onPressed: knockActive ? null : knock,
-                    icon: const Text('👊'),
-                    label: Text(
-                      knockActive
-                          ? 'GEKLOPFT'
-                          : completedTurns[currentPlayer] < 2
-                              ? 'KLOPFEN AB ZUG 3'
-                              : !complete
-                                  ? 'KLOPFEN – PLANTAGE FEHLT'
-                                  : knockReady
-                                      ? 'ICH KLOPFE!'
-                                      : 'KLOPFEN',
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 190,
-                  height: 45,
-                  child: FilledButton.icon(
-                    onPressed: hasDrawn ? null : drawCard,
-                    icon: const Icon(Icons.add_card),
-                    label: Text(hasDrawn ? 'KARTE GEZOGEN' : '1 KARTE ZIEHEN'),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 6),
             const Text(
-              'Klopfen: ab dem 3. eigenen Zug. Ohne Klopfen endet die Runde spätestens nach $maxTurnsPerPlayerPerRound Zügen pro Spieler.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white54, fontSize: 11),
-            ),
-
-            const SizedBox(height: 12),
-            const Text('DEINE PLANTAGE', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-
-            Row(
-              children: [
-                Expanded(
-                  child: PlantSlot(
-                    icon: '🌿',
-                    title: 'GRAS',
-                    card: grassSlots[currentPlayer],
-                    protected: grassProtected[currentPlayer],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: PlantSlot(
-                    icon: '⚡',
-                    title: 'ENERGIE',
-                    card: energySlots[currentPlayer],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: PlantSlot(
-                    icon: '👑',
-                    title: 'BASIS',
-                    card: baseSlots[currentPlayer],
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF123A23),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(
-                points == 0
-                    ? 'Plantage noch nicht vollständig'
-                    : 'PLANTAGENWERT: $points PUNKTE',
-                style: TextStyle(
-                  fontSize: points == 0 ? 13 : 18,
-                  fontWeight: FontWeight.bold,
-                  color: points == 0 ? Colors.white60 : const Color(0xFF9CF070),
-                ),
-              ),
-            ),
-
-            const Spacer(),
-
-            Text(
-              'DEINE HAND – ${hand.length} KARTEN',
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-
-            SizedBox(
-              height: 190,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: hand.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 12),
-                itemBuilder: (_, index) => GameCardWidget(
-                  card: hand[index],
-                  selected: selectedCardIndex == index,
-                  onTap: () => selectCard(index),
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 8),
-
-            if (selectedCardIndex != null)
-              Text(
-                'Ausgewählt: ${hands[currentPlayer][selectedCardIndex!].title}',
-                style: const TextStyle(
-                  color: Colors.amber,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-
-            const SizedBox(height: 8),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                SizedBox(
-                  width: 150,
-                  height: 48,
-                  child: FilledButton(
-                    onPressed: playSelectedCard,
-                    child: const Text('SPIELEN'),
-                  ),
-                ),
-                const SizedBox(width: 15),
-                SizedBox(
-                  width: 150,
-                  height: 48,
-                  child: OutlinedButton(
-                    onPressed: discardSelectedCard,
-                    child: const Text('ABLEGEN'),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            SizedBox(
-              width: 240,
-              height: 50,
-              child: FilledButton(
-                onPressed: turnFinished ? nextPlayer : null,
-                child: Text(
-                  knockActive ? 'LETZTEN ZUG BEENDEN' : 'NÄCHSTER SPIELER',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
+              'BAUE DEINE PLANTAGE',
+              style: TextStyle(fontSize: 9, color: Colors.white54, letterSpacing: 1),
             ),
           ],
+        ),
+        actions: [
+          IconButton(
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const CardsOverviewScreen()),
+            ),
+            icon: const Icon(Icons.style_outlined),
+          ),
+        ],
+      ),
+      bottomNavigationBar: Material(
+        color: kBg,
+        elevation: 18,
+        child: SafeArea(
+          top: false,
+          minimum: const EdgeInsets.fromLTRB(12, 5, 12, 20),
+          child: Center(
+            heightFactor: 1,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                child: turnFinished
+                    ? SizedBox(
+                        key: const ValueKey('next'),
+                        width: double.infinity,
+                        height: 47,
+                        child: FilledButton.tonal(
+                          onPressed: nextPlayer,
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              knockActive
+                                  ? 'LETZTEN ZUG BEENDEN'
+                                  : 'NÄCHSTER SPIELER',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        ),
+                      )
+                    : Row(
+                        key: const ValueKey('actions'),
+                        children: [
+                          Expanded(
+                            child: SizedBox(
+                              height: 47,
+                              child: FilledButton(
+                                onPressed: playSelectedCard,
+                                child: const FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  child: Text(
+                                    'KARTE AUSSPIELEN',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          SizedBox(
+                            width: 96,
+                            height: 47,
+                            child: OutlinedButton(
+                              onPressed: discardSelectedCard,
+                              child: const FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  'ABLEGEN',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      body: LeafBackground(
+        child: SafeArea(
+          top: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: ListView(
+                physics: const NeverScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(12, 5, 12, 3),
+                children: [
+                  SizedBox(
+                    height: 55,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: widget.players.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 7),
+                      itemBuilder: (_, index) {
+                        final active = index == currentPlayer;
+                        final color = playerAccent(index);
+                        return GestureDetector(
+                          onTap: () => showPlayerPlantation(index),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 180),
+                            width: 92,
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: active ? color.withOpacity(0.18) : const Color(0xCC092116),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: active ? color : Colors.white12, width: active ? 2 : 1),
+                            ),
+                            child: Row(
+                              children: [
+                              CircleAvatar(
+                                radius: 14,
+                                backgroundColor: color,
+                                child: active
+                                    ? const Text('👑', style: TextStyle(fontSize: 14))
+                                    : const Icon(Icons.person, color: Colors.black87, size: 17),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      widget.players[index],
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+                                    ),
+                                    Text(
+                                      '${totalScores[index]} P',
+                                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: active ? kGold : Colors.white60),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                    ),
+                  ),
+
+                  if (knockActive) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(9),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF6B3D00),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: kGold),
+                      ),
+                      child: Text(
+                        '👊 ${widget.players[knockingPlayer!]} hat geklopft – letzter Zug!',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 10),
+                  Text(
+                    'Dein Zug, ${widget.players[currentPlayer]}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: kCream),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Eigener Zug ${completedTurns[currentPlayer] + 1} • ${deck.length} Karten übrig',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 10, color: Colors.white54),
+                  ),
+
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Column(
+                        children: [
+                          CardBackStack(
+                            remaining: deck.length,
+                            enabled: !hasDrawn && deck.isNotEmpty,
+                            onTap: drawCard,
+                          ),
+                          const SizedBox(height: 4),
+                          const Text('STAPEL', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                      const SizedBox(width: 24),
+                      DiscardStack(
+                        card: topDiscard,
+                        enabled: !hasDrawn && topDiscard != null,
+                        onTake: drawDiscardCard,
+                        onZoom: topDiscard == null
+                            ? null
+                            : () => showCardZoom(topDiscard),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 5),
+                  const Text(
+                    'Ziehe vom Stapel oder nimm die oberste offene Ablage.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: Colors.white38,
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 45,
+                          child: FilledButton.icon(
+                            onPressed: !hasDrawn && deck.isNotEmpty ? drawCard : null,
+                            icon: const Icon(Icons.add_card, size: 18),
+                            label: Text(hasDrawn ? 'KARTE GEZOGEN' : 'KARTE ZIEHEN'),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: SizedBox(
+                          height: 45,
+                          child: PulseScale(
+                            active: knockReady && !knockActive,
+                            minScale: 1.0,
+                            maxScale: 1.045,
+                            duration: const Duration(milliseconds: 650),
+                            child: OutlinedButton.icon(
+                              style: knockReady && !knockActive
+                                  ? OutlinedButton.styleFrom(
+                                      side: const BorderSide(color: kGold, width: 2),
+                                      foregroundColor: kGold,
+                                    )
+                                  : null,
+                              onPressed: knockActive ? null : knock,
+                              icon: const Text('👊'),
+                              label: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  knockActive
+                                      ? 'GEKLOPFT'
+                                      : completedTurns[currentPlayer] < 2
+                                          ? 'KLOPFEN AB ZUG 3'
+                                          : !complete
+                                              ? 'PLANTAGE FEHLT'
+                                              : knockReady
+                                                  ? 'ICH KLOPFE!'
+                                                  : 'KLOPFEN',
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 6),
+                  const Text(
+                    'DEINE PLANTAGE',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, letterSpacing: 1),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(child: PlantSlot(icon: '🌿', title: 'GRAS', card: grassSlots[currentPlayer], protected: grassProtected[currentPlayer])),
+                      const SizedBox(width: 7),
+                      Expanded(child: PlantSlot(icon: '⚡', title: 'ENERGIE', card: energySlots[currentPlayer])),
+                      const SizedBox(width: 7),
+                      Expanded(child: PlantSlot(icon: '👑', title: 'BASIS', card: baseSlots[currentPlayer])),
+                    ],
+                  ),
+                  const SizedBox(height: 7),
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: points > 0 ? const Color(0xFF173A20) : const Color(0xFF0C2A1A),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: points > 0 ? kNeon.withOpacity(0.55) : Colors.white12),
+                      ),
+                      child: Text(
+                        points == 0 ? 'Plantage noch nicht vollständig' : '$points PUNKTE',
+                        style: TextStyle(
+                          color: points == 0 ? Colors.white54 : kNeon,
+                          fontWeight: FontWeight.w900,
+                          fontSize: points == 0 ? 10 : 15,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 6),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        hand.length > handLimit
+                            ? 'DEINE HAND • ${hand.length} KARTEN • 1 MUSS WEG'
+                            : 'DEINE HAND • ${hand.length} KARTEN',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w900,
+                          color: hand.length > handLimit ? kGold : Colors.white,
+                        ),
+                      ),
+                      const Text(
+                        'ALLE SICHTBAR',
+                        style: TextStyle(fontSize: 9, color: Colors.white38),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 320),
+                    switchInCurve: Curves.easeOutBack,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, animation) {
+                      final slide = Tween<Offset>(
+                        begin: const Offset(0.08, 0),
+                        end: Offset.zero,
+                      ).animate(animation);
+                      return FadeTransition(
+                        opacity: animation,
+                        child: SlideTransition(
+                          position: slide,
+                          child: child,
+                        ),
+                      );
+                    },
+                    child: KeyedSubtree(
+                      key: ValueKey(
+                        '${currentPlayer}_${hand.length}_${hand.map((card) => card.title).join('|')}',
+                      ),
+                      child: HandFan(
+                        hand: hand,
+                        selectedIndex: selectedCardIndex,
+                        onSelect: selectCard,
+                        onZoom: showCardZoom,
+                      ),
+                    ),
+                  ),
+
+                  if (selectedCardIndex != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        'Ausgewählt: ${hand[selectedCardIndex!].title}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: kGold,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
   }
+
 }
 
 class FinalScoreScreen extends StatelessWidget {
@@ -1516,61 +2878,113 @@ class FinalScoreScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final winners = determineWinners();
     final winnerText = winners.length == 1
-        ? '${players[winners.first]} ist GRASKÖNIG!'
+        ? '${players[winners.first]} ist der GRASKÖNIG!'
         : '${winners.map((i) => players[i]).join(' & ')} sind GRASKÖNIGE!';
 
     final order = List<int>.generate(players.length, (i) => i)
       ..sort((a, b) => totalScores[b].compareTo(totalScores[a]));
 
     return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 650),
-            child: Padding(
-              padding: const EdgeInsets.all(28),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: LeafBackground(
+              child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(18, 24, 18, 28),
                 children: [
-                  const Text('👑', style: TextStyle(fontSize: 90)),
-                  const SizedBox(height: 10),
                   const Text(
-                    'SPIEL BEENDET',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                    'GRATULATION!',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: kNeon,
+                      fontSize: 27,
+                      fontWeight: FontWeight.w900,
+                      fontStyle: FontStyle.italic,
+                    ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 4),
+                  const Center(child: Text('👑', style: TextStyle(fontSize: 78))),
+                  const Text(
+                    'GRASKÖNIG',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 42,
+                      fontWeight: FontWeight.w900,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                  const SizedBox(height: 7),
                   Text(
                     winnerText,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 34,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF9CF070),
+                    style: const TextStyle(color: kCream, fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 22),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xDB061E12),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: Colors.white12),
+                    ),
+                    child: Column(
+                      children: [
+                        for (int position = 0; position < order.length; position++)
+                          Container(
+                            margin: const EdgeInsets.all(6),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                            decoration: BoxDecoration(
+                              color: position == 0 ? const Color(0x443F8C2D) : Colors.black26,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: position == 0 ? kGold : Colors.white10),
+                            ),
+                            child: Row(
+                              children: [
+                                SizedBox(
+                                  width: 30,
+                                  child: Text(
+                                    position == 0 ? '👑' : '${position + 1}.',
+                                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+                                  ),
+                                ),
+                                CircleAvatar(
+                                  radius: 14,
+                                  backgroundColor: playerAccent(order[position]),
+                                  child: const Icon(Icons.person, color: Colors.black87, size: 17),
+                                ),
+                                const SizedBox(width: 9),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(players[order[position]], style: const TextStyle(fontWeight: FontWeight.w900)),
+                                      Text(
+                                        '${roundWins[order[position]]}× beste Plantage',
+                                        style: const TextStyle(fontSize: 9, color: Colors.white54),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Text(
+                                  '${totalScores[order[position]]}',
+                                  style: TextStyle(
+                                    fontSize: position == 0 ? 24 : 19,
+                                    fontWeight: FontWeight.w900,
+                                    color: position == 0 ? kGold : Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 28),
-                  for (int position = 0; position < order.length; position++)
-                    Card(
-                      child: ListTile(
-                        leading: Text(
-                          position == 0 ? '👑' : '${position + 1}.',
-                          style: const TextStyle(fontSize: 24),
-                        ),
-                        title: Text(
-                          players[order[position]],
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        subtitle: Text('${roundWins[order[position]]}× höchste Plantage'),
-                        trailing: Text(
-                          '${totalScores[order[position]]} P',
-                          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: 25),
+                  const SizedBox(height: 18),
                   SizedBox(
-                    width: 280,
-                    height: 55,
+                    height: 54,
                     child: FilledButton(
                       onPressed: () {
                         Navigator.of(context).pushAndRemoveUntil(
@@ -1578,18 +2992,456 @@ class FinalScoreScreen extends StatelessWidget {
                           (route) => false,
                         );
                       },
-                      child: const Text(
-                        'NEUES SPIEL',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
+                      child: const Text('NEUES SPIEL'),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 48,
+                    child: OutlinedButton(
+                      onPressed: () {
+                        Navigator.of(context).pushAndRemoveUntil(
+                          MaterialPageRoute(builder: (_) => const StartScreen()),
+                          (route) => false,
+                        );
+                      },
+                      child: const Text('HAUPTMENÜ'),
                     ),
                   ),
                 ],
               ),
             ),
           ),
-        ),
+              ),
+            ),
+          ),
+          const Positioned.fill(
+            child: IgnorePointer(
+              child: ConfettiCelebration(),
+            ),
+          ),
+        ],
       ),
+    );
+  }
+}
+
+class MenuButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool primary;
+
+  const MenuButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.primary = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 54,
+      child: primary
+          ? FilledButton.icon(
+              onPressed: onTap,
+              icon: Icon(icon, size: 24),
+              label: Text(label, style: const TextStyle(fontSize: 17, letterSpacing: 0.4)),
+            )
+          : OutlinedButton.icon(
+              onPressed: onTap,
+              icon: Icon(icon, size: 22),
+              label: Text(label, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: 0.4)),
+            ),
+    );
+  }
+}
+
+class SectionPanel extends StatelessWidget {
+  final String title;
+  final Widget child;
+
+  const SectionPanel({super.key, required this.title, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: const Color(0xDC071E12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: kCream, letterSpacing: 0.8),
+          ),
+          const SizedBox(height: 10),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class ModeRow extends StatelessWidget {
+  final bool selected;
+  final String title;
+  final String subtitle;
+
+  const ModeRow({super.key, required this.selected, required this.title, required this.subtitle});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: selected ? const Color(0x3316A638) : Colors.black26,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: selected ? kNeon : Colors.white12),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            selected ? Icons.radio_button_checked : Icons.radio_button_off,
+            color: selected ? kNeon : Colors.white38,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
+                Text(subtitle, style: const TextStyle(fontSize: 10, color: Colors.white54)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class PulseScale extends StatefulWidget {
+  final bool active;
+  final double minScale;
+  final double maxScale;
+  final Duration duration;
+  final Widget child;
+
+  const PulseScale({
+    super.key,
+    required this.active,
+    required this.child,
+    this.minScale = 1.0,
+    this.maxScale = 1.04,
+    this.duration = const Duration(milliseconds: 800),
+  });
+
+  @override
+  State<PulseScale> createState() => _PulseScaleState();
+}
+
+class _PulseScaleState extends State<PulseScale>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: widget.duration);
+    _syncAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant PulseScale oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.active != widget.active || oldWidget.duration != widget.duration) {
+      _controller.duration = widget.duration;
+      _syncAnimation();
+    }
+  }
+
+  void _syncAnimation() {
+    if (widget.active) {
+      _controller.repeat(reverse: true);
+    } else {
+      _controller.stop();
+      _controller.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      child: widget.child,
+      builder: (context, child) {
+        final scale = widget.minScale +
+            (widget.maxScale - widget.minScale) * _controller.value;
+        return Transform.scale(scale: scale, child: child);
+      },
+    );
+  }
+}
+
+class ConfettiCelebration extends StatefulWidget {
+  const ConfettiCelebration({super.key});
+
+  @override
+  State<ConfettiCelebration> createState() => _ConfettiCelebrationState();
+}
+
+class _ConfettiCelebrationState extends State<ConfettiCelebration>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 5),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (_, __) => CustomPaint(
+        painter: ConfettiPainter(_controller.value),
+        size: Size.infinite,
+      ),
+    );
+  }
+}
+
+class ConfettiPainter extends CustomPainter {
+  final double progress;
+
+  ConfettiPainter(this.progress);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final random = Random(42);
+    const colors = <Color>[
+      kNeon,
+      kGold,
+      Color(0xFFFF6B6B),
+      Color(0xFF53A7FF),
+      kCream,
+    ];
+
+    for (int i = 0; i < 42; i++) {
+      final x = random.nextDouble() * size.width;
+      final start = random.nextDouble();
+      final speed = 0.45 + random.nextDouble() * 0.8;
+      final yNorm = (start + progress * speed) % 1.15;
+      final y = yNorm * size.height - 20;
+      final sway = sin((progress * 8) + i) * (8 + random.nextDouble() * 12);
+      final angle = progress * 8 + random.nextDouble() * pi;
+      final w = 5.0 + random.nextDouble() * 5;
+      final h = 8.0 + random.nextDouble() * 8;
+      final paint = Paint()..color = colors[i % colors.length].withOpacity(0.85);
+
+      canvas.save();
+      canvas.translate(x + sway, y);
+      canvas.rotate(angle);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromCenter(center: Offset.zero, width: w, height: h),
+          const Radius.circular(2),
+        ),
+        paint,
+      );
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant ConfettiPainter oldDelegate) =>
+      oldDelegate.progress != progress;
+}
+
+class LeafBackground extends StatelessWidget {
+  final Widget child;
+
+  const LeafBackground({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const ColoredBox(color: kBg),
+        const IgnorePointer(child: CustomPaint(painter: LeafPatternPainter())),
+        child,
+      ],
+    );
+  }
+}
+
+class LeafPatternPainter extends CustomPainter {
+  const LeafPatternPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = const Color(0x1028A848);
+    final stemPaint = Paint()
+      ..color = const Color(0x0D7EE68E)
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    final points = <Offset>[
+      Offset(size.width * .08, size.height * .10),
+      Offset(size.width * .78, size.height * .08),
+      Offset(size.width * .94, size.height * .28),
+      Offset(size.width * .15, size.height * .42),
+      Offset(size.width * .72, size.height * .50),
+      Offset(size.width * .07, size.height * .72),
+      Offset(size.width * .87, size.height * .80),
+      Offset(size.width * .38, size.height * .92),
+    ];
+
+    for (int i = 0; i < points.length; i++) {
+      final p = points[i];
+      final angle = (i % 4) * .7;
+      canvas.save();
+      canvas.translate(p.dx, p.dy);
+      canvas.rotate(angle);
+      canvas.drawLine(const Offset(0, -24), const Offset(0, 28), stemPaint);
+      for (int j = -2; j <= 2; j++) {
+        final y = j * 11.0;
+        canvas.save();
+        canvas.translate(0, y);
+        canvas.rotate(j.isEven ? .55 : -.55);
+        canvas.drawOval(const Rect.fromLTWH(-5, -13, 10, 26), paint);
+        canvas.restore();
+      }
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class DiscardStack extends StatelessWidget {
+  final GameCard? card;
+  final bool enabled;
+  final VoidCallback onTake;
+  final VoidCallback? onZoom;
+
+  const DiscardStack({
+    super.key,
+    required this.card,
+    required this.enabled,
+    required this.onTake,
+    this.onZoom,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            GestureDetector(
+              onTap: enabled ? onTake : null,
+              onLongPress: onZoom,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                width: 70,
+                height: 104,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0C2A1A),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: enabled ? kGold : Colors.white24,
+                    width: enabled ? 2 : 1,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: enabled
+                          ? kGold.withOpacity(0.18)
+                          : Colors.black38,
+                      blurRadius: enabled ? 12 : 8,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: card == null
+                    ? const Center(
+                        child: Icon(
+                          Icons.layers_clear_outlined,
+                          color: Colors.white24,
+                          size: 30,
+                        ),
+                      )
+                    : card!.assetPath != null
+                        ? Image.asset(
+                            card!.assetPath!,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) =>
+                                CardFallbackLarge(card: card!),
+                          )
+                        : CardFallbackLarge(card: card!),
+              ),
+            ),
+            if (card != null && onZoom != null)
+              Positioned(
+                right: -5,
+                top: -5,
+                child: GestureDetector(
+                  onTap: onZoom,
+                  child: Container(
+                    width: 25,
+                    height: 25,
+                    decoration: BoxDecoration(
+                      color: const Color(0xDD071B12),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: const Icon(
+                      Icons.search_rounded,
+                      size: 15,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          enabled ? 'ABLAGE NEHMEN' : 'ABLAGE',
+          style: TextStyle(
+            fontSize: 8.5,
+            fontWeight: FontWeight.bold,
+            color: enabled ? kGold : Colors.white,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1611,12 +3463,74 @@ String cardIcon(CardType type) {
   }
 }
 
-class GameCardWidget extends StatelessWidget {
-  final GameCard card;
-  final bool selected;
+class CardBackStack extends StatelessWidget {
+  final int remaining;
+  final bool enabled;
   final VoidCallback onTap;
 
-  const GameCardWidget({super.key, required this.card, required this.selected, required this.onTap});
+  const CardBackStack({
+    super.key,
+    required this.remaining,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  Widget backCard() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(9),
+      child: Image.asset(
+        'assets/cards/back.jpg',
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => Container(
+          color: const Color(0xFF0C482A),
+          alignment: Alignment.center,
+          child: const Text('👑', style: TextStyle(fontSize: 28)),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: PulseScale(
+        active: enabled,
+        minScale: 1.0,
+        maxScale: 1.025,
+        duration: const Duration(milliseconds: 900),
+        child: Opacity(
+          opacity: enabled ? 1 : 0.52,
+          child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 68,
+              height: 88,
+              child: Stack(
+                children: [
+                  Positioned(left: 10, top: 0, width: 54, height: 81, child: backCard()),
+                  Positioned(left: 6, top: 3, width: 54, height: 81, child: backCard()),
+                  Positioned(left: 2, top: 6, width: 54, height: 81, child: backCard()),
+                ],
+              ),
+            ),
+            Text(
+              enabled ? 'ZIEHEN • $remaining' : 'GEZOGEN • $remaining',
+              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        ),
+      ),
+    );
+  }
+}
+
+class CardFallbackLarge extends StatelessWidget {
+  final GameCard card;
+
+  const CardFallbackLarge({super.key, required this.card});
 
   Color cardColor() {
     switch (card.type) {
@@ -1637,34 +3551,258 @@ class GameCardWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return Container(
+      color: cardColor(),
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          Text(cardIcon(card.type), style: const TextStyle(fontSize: 54)),
+          Text(
+            card.title.toUpperCase(),
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900),
+          ),
+          Text(
+            card.value,
+            style: const TextStyle(fontSize: 44, fontWeight: FontWeight.w900),
+          ),
+          Text(
+            card.effect,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 17),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class HandFan extends StatelessWidget {
+  final List<GameCard> hand;
+  final int? selectedIndex;
+  final ValueChanged<int> onSelect;
+  final ValueChanged<GameCard> onZoom;
+
+  const HandFan({
+    super.key,
+    required this.hand,
+    required this.selectedIndex,
+    required this.onSelect,
+    required this.onZoom,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (hand.isEmpty) {
+      return const SizedBox(
+        height: 156,
+        child: Center(
+          child: Text(
+            'Keine Karten auf der Hand',
+            style: TextStyle(color: Colors.white54),
+          ),
+        ),
+      );
+    }
+
+    const cardWidth = 104.0;
+    const cardHeight = 154.0;
+    const topPadding = 6.0;
+
+    return SizedBox(
+      height: 166,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final count = hand.length;
+          final maxWidth = constraints.maxWidth;
+
+          // Bei wenigen Karten stehen sie fast nebeneinander. Ab 4 Karten
+          // überlappen sie wie ein echter Kartenfächer, sodass jede Karte
+          // zumindest sichtbar und antippbar bleibt.
+          final naturalStep = cardWidth + 8;
+          final fitStep = count <= 1
+              ? 0.0
+              : (maxWidth - cardWidth) / (count - 1);
+          final step = count <= 1
+              ? 0.0
+              : min(naturalStep, max(38.0, fitStep));
+
+          final totalWidth = cardWidth + step * (count - 1);
+          final startLeft = max(0.0, (maxWidth - totalWidth) / 2);
+
+          final normalChildren = <Widget>[];
+          Widget? selectedChild;
+
+          for (int index = 0; index < count; index++) {
+            final child = Positioned(
+              left: startLeft + (step * index),
+              top: topPadding,
+              width: cardWidth,
+              height: cardHeight,
+              child: GameCardWidget(
+                card: hand[index],
+                selected: selectedIndex == index,
+                onTap: () => onSelect(index),
+                onZoom: () => onZoom(hand[index]),
+              ),
+            );
+
+            // Die ausgewählte Karte wird zuletzt gezeichnet und liegt dadurch
+            // sichtbar über den anderen Karten.
+            if (selectedIndex == index) {
+              selectedChild = child;
+            } else {
+              normalChildren.add(child);
+            }
+          }
+
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              ...normalChildren,
+              if (selectedChild != null) selectedChild,
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class GameCardWidget extends StatelessWidget {
+  final GameCard card;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onZoom;
+
+  const GameCardWidget({
+    super.key,
+    required this.card,
+    required this.selected,
+    required this.onTap,
+    required this.onZoom,
+  });
+
+  Color cardColor() {
+    switch (card.type) {
+      case CardType.grass:
+        return const Color(0xFF13713B);
+      case CardType.energy:
+        return const Color(0xFFC89600);
+      case CardType.base:
+        return const Color(0xFF712792);
+      case CardType.attack:
+        return const Color(0xFFA62620);
+      case CardType.defense:
+        return const Color(0xFF1374AA);
+      case CardType.action:
+        return const Color(0xFFBC6000);
+    }
+  }
+
+  Widget fallbackCard() {
+    return Container(
+      color: cardColor(),
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        children: [
+          Text(cardIcon(card.type), style: const TextStyle(fontSize: 27)),
+          const SizedBox(height: 5),
+          Text(
+            card.title.toUpperCase(),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            card.value,
+            style: const TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            card.effect,
+            textAlign: TextAlign.center,
+            maxLines: 3,
+            style: const TextStyle(fontSize: 9),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        width: 125,
-        padding: const EdgeInsets.all(10),
-        transform: selected ? Matrix4.translationValues(0, -8, 0) : Matrix4.identity(),
+      child: AnimatedScale(
+        scale: selected ? 1.045 : 1.0,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutBack,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 104,
+        transform: selected
+            ? Matrix4.translationValues(0, -8, 0)
+            : Matrix4.identity(),
         decoration: BoxDecoration(
-          color: cardColor(),
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: selected ? Colors.amber : Colors.white, width: selected ? 4 : 2),
+          border: Border.all(
+            color: selected ? Colors.amber : Colors.white,
+            width: selected ? 4 : 2,
+          ),
           boxShadow: [
             BoxShadow(
-              color: selected ? Colors.amber.withOpacity(0.35) : Colors.black45,
+              color: selected
+                  ? Colors.amber.withOpacity(0.35)
+                  : Colors.black45,
               blurRadius: selected ? 12 : 6,
             ),
           ],
         ),
-        child: Column(
+        child: Stack(
           children: [
-            Text(cardIcon(card.type), style: const TextStyle(fontSize: 27)),
-            const SizedBox(height: 5),
-            Text(card.title.toUpperCase(), textAlign: TextAlign.center, maxLines: 2, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-            const Spacer(),
-            Text(card.value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
-            const Spacer(),
-            Text(card.effect, textAlign: TextAlign.center, maxLines: 3, style: const TextStyle(fontSize: 9)),
+            Positioned.fill(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(11),
+                child: card.assetPath != null
+                    ? Image.asset(
+                        card.assetPath!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: double.infinity,
+                        errorBuilder: (context, error, stackTrace) {
+                          return fallbackCard();
+                        },
+                      )
+                    : fallbackCard(),
+              ),
+            ),
+            Positioned(
+              top: 6,
+              right: 6,
+              child: Material(
+                color: Colors.black.withOpacity(0.58),
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: onZoom,
+                  child: const Padding(
+                    padding: EdgeInsets.all(7),
+                    child: Icon(Icons.zoom_in, size: 18, color: Colors.white),
+                  ),
+                ),
+              ),
+            ),
           ],
+        ),
         ),
       ),
     );
@@ -1677,38 +3815,170 @@ class PlantSlot extends StatelessWidget {
   final GameCard? card;
   final bool protected;
 
-  const PlantSlot({super.key, required this.icon, required this.title, required this.card, this.protected = false});
+  const PlantSlot({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.card,
+    this.protected = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 145,
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOut,
+      height: 92,
       decoration: BoxDecoration(
         color: const Color(0xFF0B2718),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: protected ? Colors.lightBlueAccent : Colors.white24, width: protected ? 3 : 2),
+        border: Border.all(
+          color: protected ? Colors.lightBlueAccent : Colors.white24,
+          width: protected ? 3 : 2,
+        ),
+        boxShadow: card != null
+            ? const [
+                BoxShadow(
+                  color: Color(0x3316A638),
+                  blurRadius: 12,
+                  spreadRadius: 1,
+                ),
+              ]
+            : null,
       ),
-      child: Center(
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 360),
+        switchInCurve: Curves.easeOutBack,
+        switchOutCurve: Curves.easeIn,
+        transitionBuilder: (child, animation) {
+          return FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.78, end: 1.0).animate(animation),
+              child: child,
+            ),
+          );
+        },
         child: card == null
             ? Column(
+                key: ValueKey('empty_$title'),
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(icon, style: const TextStyle(fontSize: 38)),
-                  const SizedBox(height: 10),
-                  Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text(
+                    icon,
+                    style: const TextStyle(fontSize: 30),
+                  ),
+                  const SizedBox(height: 7),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      title,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
                 ],
               )
-            : Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(protected ? '🪴' : icon, style: const TextStyle(fontSize: 28)),
-                  const SizedBox(height: 5),
-                  Text(card!.title, textAlign: TextAlign.center, maxLines: 2, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  Text(card!.value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: Color(0xFF9CF070))),
-                ],
+            : Padding(
+                key: ValueKey('${card!.title}_${card!.value}_$protected'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 5,
+                  vertical: 4,
+                ),
+                child: Row(
+                  children: [
+                    if (card!.assetPath != null)
+                      SizedBox(
+                        width: 45,
+                        height: 72,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: Image.asset(
+                            card!.assetPath!,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              color: const Color(0xFF143824),
+                              alignment: Alignment.center,
+                              child: Text(
+                                icon,
+                                style: const TextStyle(fontSize: 27),
+                              ),
+                            ),
+                          ),
+                        ),
+                      )
+                    else
+                      SizedBox(
+                        width: 42,
+                        child: Center(
+                          child: Text(
+                            protected ? '🪴' : icon,
+                            style: const TextStyle(fontSize: 30),
+                          ),
+                        ),
+                      ),
+
+                    const SizedBox(width: 5),
+
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (protected) ...[
+                            const FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                '🪴 GESCHÜTZT',
+                                style: TextStyle(
+                                  fontSize: 8,
+                                  color: Colors.lightBlueAccent,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                          ],
+
+                          Text(
+                            card!.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              height: 1.05,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(height: 3),
+
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              card!.value,
+                              maxLines: 1,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                height: 1,
+                                fontWeight: FontWeight.w900,
+                                color: kNeon,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
       ),
     );
   }
 }
+

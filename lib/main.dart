@@ -31,6 +31,7 @@ Future<void> lockLandscapeOrientation() {
   ]);
 }
 
+// Graskoenig V0.10.7 - Native TestFlight Landscape Fix
 const int handLimit = 5;
 const int maxTurnsPerPlayerPerRound = 6;
 
@@ -447,7 +448,7 @@ class _StartScreenState extends State<StartScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (MediaQuery.of(context).orientation == Orientation.landscape) {
+    if (!kIsWeb && MediaQuery.of(context).orientation == Orientation.landscape) {
       return const OrientationHintScreen(
         portrait: true,
         title: 'BITTE IPHONE HOCHKANT HALTEN',
@@ -585,7 +586,7 @@ class _StartScreenState extends State<StartScreen> {
                       ),
                       const SizedBox(height: 8),
                       const Text(
-                        'PROTOTYP • V0.10.5 • SAFARI TOUCH-FIX • 2–3 SPIELER • BOT',
+                        'PROTOTYP • V0.10.7 • TESTFLIGHT NATIVE FIX • 2–3 SPIELER • BOT',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white38,
@@ -882,7 +883,7 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (MediaQuery.of(context).orientation == Orientation.landscape) {
+    if (!kIsWeb && MediaQuery.of(context).orientation == Orientation.landscape) {
       return const OrientationHintScreen(
         portrait: true,
         title: 'BITTE IPHONE HOCHKANT HALTEN',
@@ -1007,7 +1008,7 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                                         )
                                       : TextField(
                                           controller: controllers[index],
-                                          style: const TextStyle(fontWeight: FontWeight.w700),
+                                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
                                           decoration: const InputDecoration(
                                             border: InputBorder.none,
                                             isDense: true,
@@ -1050,7 +1051,14 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                     height: 58,
                     child: FilledButton.icon(
                       icon: const Icon(Icons.screen_rotation_rounded),
-                      onPressed: () {
+                      onPressed: () async {
+                        // Wichtig fuer iPhone/Safari: vor dem Wechsel ins Spiel
+                        // jedes Textfeld sicher verlassen und dem VisualViewport
+                        // Zeit geben, nach der Tastatur wieder auf 1:1 zu kommen.
+                        FocusManager.instance.primaryFocus?.unfocus();
+                        await Future<void>.delayed(const Duration(milliseconds: 350));
+                        if (!mounted) return;
+
                         final players = List<String>.generate(
                           playerCount,
                           (index) {
@@ -1071,14 +1079,51 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                           (index) => useBot && index == playerCount - 1,
                         );
 
+                        if (!kIsWeb) {
+                          // Native iOS/Android: zuerst wirklich ins Querformat
+                          // wechseln und danach direkt das Spiel oeffnen.
+                          // Die Safari-Zwischenansicht darf hier NICHT verwendet
+                          // werden, weil sie auf eine Rotation wartet, waehrend
+                          // der Setup-Screen noch auf Portrait gesperrt ist.
+                          await lockLandscapeOrientation();
+                          await Future<void>.delayed(
+                            const Duration(milliseconds: 300),
+                          );
+                          if (!mounted) return;
+
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => GameScreen(
+                                players: players,
+                                avatarAssets: avatars,
+                                botPlayers: bots,
+                              ),
+                            ),
+                          );
+                          return;
+                        }
+
+                        // Web/Safari: dort bleibt die spezielle Zwischenansicht
+                        // bestehen, weil sie die Safari-Touchkoordinaten nach
+                        // einer manuellen Drehung stabilisiert.
+                        final alreadyLandscape =
+                            MediaQuery.of(context).orientation == Orientation.landscape;
+
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => LandscapeLaunchScreen(
-                              players: players,
-                              avatarAssets: avatars,
-                              botPlayers: bots,
-                            ),
+                            builder: (_) => alreadyLandscape
+                                ? GameScreen(
+                                    players: players,
+                                    avatarAssets: avatars,
+                                    botPlayers: bots,
+                                  )
+                                : LandscapeLaunchScreen(
+                                    players: players,
+                                    avatarAssets: avatars,
+                                    botPlayers: bots,
+                                  ),
                           ),
                         );
                       },
@@ -1089,8 +1134,10 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  const Text(
-                    'Nach dem Start wechselt das Spiel ins Querformat.',
+                  Text(
+                    kIsWeb
+                        ? 'iPhone-Test: am besten schon VOR dem Start quer halten.'
+                        : 'Nach dem Start wechselt das Spiel ins Querformat.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.white38, fontSize: 10),
                   ),
@@ -1249,7 +1296,7 @@ class _OnlineJoinScreenState extends State<OnlineJoinScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (MediaQuery.of(context).orientation == Orientation.landscape) {
+    if (!kIsWeb && MediaQuery.of(context).orientation == Orientation.landscape) {
       return const OrientationHintScreen(
         portrait: true,
         title: 'BITTE IPHONE HOCHKANT HALTEN',

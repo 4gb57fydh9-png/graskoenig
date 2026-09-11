@@ -1,4 +1,4 @@
-package com.example.graskoenig
+package com.graskoenig.game
 
 import io.flutter.embedding.android.FlutterActivity
 

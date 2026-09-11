@@ -1,11 +1,34 @@
 import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await lockPortraitOrientation();
   runApp(const GraskoenigApp());
+}
+
+Future<void> lockPortraitOrientation() {
+  // Im Browser (vor allem Safari auf dem iPhone) darf Flutter die
+  // Geräteausrichtung nicht erzwingen. Nach einem Wechsel Portrait ->
+  // Landscape kann Safari sonst sichtbare Widgets und Touch-Koordinaten
+  // gegeneinander verschieben. Native Android/iOS Builds werden weiterhin
+  // korrekt gesperrt.
+  if (kIsWeb) return Future<void>.value();
+  return SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
+}
+
+Future<void> lockLandscapeOrientation() {
+  if (kIsWeb) return Future<void>.value();
+  return SystemChrome.setPreferredOrientations([
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
 }
 
 const int handLimit = 5;
@@ -116,6 +139,26 @@ Color playerAccent(int index) {
     Color(0xFF38D6C7),
   ];
   return colors[index % colors.length];
+}
+
+class AvatarOption {
+  final String name;
+  final String assetPath;
+
+  const AvatarOption(this.name, this.assetPath);
+}
+
+const List<AvatarOption> kAvatarOptions = <AvatarOption>[
+  AvatarOption('Graskönig', 'assets/cards/graskoenig.jpg'),
+  AvatarOption('Dealer', 'assets/cards/dealer.jpg'),
+  AvatarOption('Kumpel', 'assets/cards/basis2.jpg'),
+  AvatarOption('Growshop', 'assets/cards/growshop.jpg'),
+  AvatarOption('Anwalt', 'assets/cards/anwalt.jpg'),
+  AvatarOption('Beste Freunde', 'assets/cards/freunde.jpg'),
+];
+
+String playerAvatarAsset(int index) {
+  return kAvatarOptions[index % kAvatarOptions.length].assetPath;
 }
 
 enum CardType { grass, energy, base, attack, defense, action }
@@ -296,6 +339,61 @@ class GraskoenigApp extends StatelessWidget {
   }
 }
 
+class OrientationHintScreen extends StatelessWidget {
+  final bool portrait;
+  final String title;
+  final String subtitle;
+
+  const OrientationHintScreen({
+    super.key,
+    required this.portrait,
+    required this.title,
+    required this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: LeafBackground(
+        child: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    portrait
+                        ? Icons.stay_current_portrait_rounded
+                        : Icons.stay_current_landscape_rounded,
+                    size: 64,
+                    color: kGold,
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    title,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    subtitle,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white60),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class StartScreen extends StatefulWidget {
   const StartScreen({super.key});
 
@@ -304,6 +402,12 @@ class StartScreen extends StatefulWidget {
 }
 
 class _StartScreenState extends State<StartScreen> {
+  @override
+  void initState() {
+    super.initState();
+    lockPortraitOrientation();
+  }
+
   Future<void> _openPage(Widget page) async {
     await GameFeedback.stopMenuMusic();
     if (!mounted) return;
@@ -343,6 +447,14 @@ class _StartScreenState extends State<StartScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (MediaQuery.of(context).orientation == Orientation.landscape) {
+      return const OrientationHintScreen(
+        portrait: true,
+        title: 'BITTE IPHONE HOCHKANT HALTEN',
+        subtitle: 'Das Hauptmenü ist für Hochformat optimiert.',
+      );
+    }
+
     return Scaffold(
       body: LeafBackground(
         child: SafeArea(
@@ -431,7 +543,7 @@ class _StartScreenState extends State<StartScreen> {
 
                       MenuButton(
                         icon: Icons.play_arrow_rounded,
-                        label: 'NEUES SPIEL',
+                        label: 'SPIEL STARTEN',
                         primary: true,
                         onTap: () => _openPage(const PlayerSetupScreen()),
                       ),
@@ -439,7 +551,7 @@ class _StartScreenState extends State<StartScreen> {
                       MenuButton(
                         icon: Icons.groups_2_outlined,
                         label: 'SPIEL BEITRETEN',
-                        onTap: () => _comingSoon(context, 'Online-Spiel'),
+                        onTap: () => _openPage(const OnlineJoinScreen()),
                       ),
                       const SizedBox(height: 9),
                       MenuButton(
@@ -473,7 +585,7 @@ class _StartScreenState extends State<StartScreen> {
                       ),
                       const SizedBox(height: 8),
                       const Text(
-                        'PROTOTYP • V0.9.8',
+                        'PROTOTYP • V0.10.5 • SAFARI TOUCH-FIX • 2–3 SPIELER • BOT',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white38,
@@ -669,16 +781,22 @@ class PlayerSetupScreen extends StatefulWidget {
 }
 
 class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
-  int playerCount = 4;
+  int playerCount = 2;
+  bool useBot = false;
 
   final controllers = [
     TextEditingController(text: 'Spieler 1'),
     TextEditingController(text: 'Spieler 2'),
     TextEditingController(text: 'Spieler 3'),
-    TextEditingController(text: 'Spieler 4'),
-    TextEditingController(text: 'Spieler 5'),
-    TextEditingController(text: 'Spieler 6'),
   ];
+
+  final List<int> avatarSelections = <int>[0, 1, 2];
+
+  @override
+  void initState() {
+    super.initState();
+    lockPortraitOrientation();
+  }
 
   @override
   void dispose() {
@@ -688,10 +806,92 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
     super.dispose();
   }
 
+  Future<void> chooseAvatar(int playerIndex) async {
+    final selected = await showDialog<int>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('AVATAR FÜR SPIELER ${playerIndex + 1}'),
+          content: SizedBox(
+            width: 360,
+            child: GridView.builder(
+              shrinkWrap: true,
+              itemCount: kAvatarOptions.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                mainAxisSpacing: 10,
+                crossAxisSpacing: 10,
+                childAspectRatio: 0.82,
+              ),
+              itemBuilder: (context, index) {
+                final avatar = kAvatarOptions[index];
+                final active = avatarSelections[playerIndex] == index;
+                return InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: () => Navigator.pop(context, index),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: active ? const Color(0xFF174D24) : Colors.black26,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: active ? kNeon : Colors.white24,
+                        width: active ? 2.5 : 1,
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        Expanded(
+                          child: ClipOval(
+                            child: Image.asset(
+                              avatar.assetPath,
+                              fit: BoxFit.cover,
+                              alignment: Alignment.topCenter,
+                              errorBuilder: (_, __, ___) => const Center(
+                                child: Icon(Icons.person, size: 42),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          avatar.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+
+    if (selected != null && mounted) {
+      setState(() => avatarSelections[playerIndex] = selected);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (MediaQuery.of(context).orientation == Orientation.landscape) {
+      return const OrientationHintScreen(
+        portrait: true,
+        title: 'BITTE IPHONE HOCHKANT HALTEN',
+        subtitle: 'Spieler, Bot und Avatare stellst du im Hochformat ein.',
+      );
+    }
+
     return Scaffold(
-      appBar: AppBar(title: const Text('NEUES SPIEL')),
+      appBar: AppBar(title: const Text('LOKALES SPIEL')),
       body: LeafBackground(
         child: SafeArea(
           top: false,
@@ -704,77 +904,133 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                   SectionPanel(
                     title: 'SPIELERANZAHL',
                     child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: List.generate(5, (index) {
-                        final number = index + 2;
-                        final selected = playerCount == number;
-                        return InkWell(
-                          borderRadius: BorderRadius.circular(30),
-                          onTap: () => setState(() => playerCount = number),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 160),
-                            width: 48,
-                            height: 48,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: selected ? const Color(0xFF174D24) : Colors.black26,
-                              border: Border.all(
-                                color: selected ? kNeon : Colors.white30,
-                                width: selected ? 2.5 : 1,
+                      children: [
+                        for (final number in const [2, 3]) ...[
+                          Expanded(
+                            child: ChoiceChip(
+                              label: SizedBox(
+                                height: 34,
+                                child: Center(
+                                  child: Text(
+                                    '$number SPIELER',
+                                    style: const TextStyle(fontWeight: FontWeight.w900),
+                                  ),
+                                ),
                               ),
-                              boxShadow: selected
-                                  ? const [BoxShadow(color: Color(0x8842F35C), blurRadius: 12)]
-                                  : null,
-                            ),
-                            child: Text(
-                              '$number',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w900,
-                                color: selected ? Colors.white : Colors.white70,
+                              selected: playerCount == number,
+                              onSelected: (_) => setState(() => playerCount = number),
+                              selectedColor: const Color(0xFF174D24),
+                              side: BorderSide(
+                                color: playerCount == number ? kNeon : Colors.white24,
                               ),
                             ),
                           ),
-                        );
-                      }),
+                          if (number == 2) const SizedBox(width: 10),
+                        ],
+                      ],
                     ),
                   ),
                   const SizedBox(height: 12),
                   SectionPanel(
-                    title: 'SPIELER',
+                    title: 'GEGNER',
+                    child: Column(
+                      children: [
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          secondary: Icon(
+                            useBot ? Icons.smart_toy_rounded : Icons.groups_2_rounded,
+                            color: useBot ? kGold : kNeon,
+                          ),
+                          title: Text(
+                            useBot ? 'MIT BOT' : 'NUR MENSCHEN',
+                            style: const TextStyle(fontWeight: FontWeight.w900),
+                          ),
+                          subtitle: Text(
+                            useBot
+                                ? playerCount == 2
+                                    ? 'Du spielst gegen einen Computergegner.'
+                                    : 'Die letzte Position übernimmt der Bot.'
+                                : 'Alle Spieler spielen lokal auf diesem Gerät.',
+                          ),
+                          value: useBot,
+                          onChanged: (value) => setState(() => useBot = value),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SectionPanel(
+                    title: 'SPIELER & AVATARE',
                     child: Column(
                       children: List.generate(playerCount, (index) {
+                        final isBot = useBot && index == playerCount - 1;
+                        final avatar = kAvatarOptions[avatarSelections[index]];
                         final color = playerAccent(index);
                         return Padding(
-                          padding: EdgeInsets.only(bottom: index == playerCount - 1 ? 0 : 8),
+                          padding: EdgeInsets.only(bottom: index == playerCount - 1 ? 0 : 10),
                           child: Container(
                             decoration: BoxDecoration(
                               color: Colors.black26,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.white12),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: isBot ? kGold.withOpacity(0.7) : Colors.white12,
+                              ),
                             ),
                             child: Row(
                               children: [
-                                const SizedBox(width: 10),
-                                CircleAvatar(
-                                  radius: 16,
-                                  backgroundColor: color,
-                                  child: const Icon(Icons.person, color: Colors.black87, size: 21),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: TextField(
-                                    controller: controllers[index],
-                                    style: const TextStyle(fontWeight: FontWeight.w700),
-                                    decoration: const InputDecoration(
-                                      border: InputBorder.none,
-                                      isDense: true,
-                                      contentPadding: EdgeInsets.symmetric(vertical: 14),
+                                const SizedBox(width: 8),
+                                InkWell(
+                                  borderRadius: BorderRadius.circular(30),
+                                  onTap: () => chooseAvatar(index),
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(4),
+                                    child: GraskoenigAvatar(
+                                      playerIndex: index,
+                                      assetPath: avatar.assetPath,
+                                      size: 42,
+                                      borderColor: color,
                                     ),
                                   ),
                                 ),
-                                const Icon(Icons.edit_outlined, color: kGold, size: 20),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: isBot
+                                      ? const Padding(
+                                          padding: EdgeInsets.symmetric(vertical: 15),
+                                          child: Text(
+                                            'Kiffer-Karl  •  BOT',
+                                            style: TextStyle(
+                                              color: kGold,
+                                              fontWeight: FontWeight.w900,
+                                            ),
+                                          ),
+                                        )
+                                      : TextField(
+                                          controller: controllers[index],
+                                          style: const TextStyle(fontWeight: FontWeight.w700),
+                                          decoration: const InputDecoration(
+                                            border: InputBorder.none,
+                                            isDense: true,
+                                            hintText: 'Spielername',
+                                            contentPadding: EdgeInsets.symmetric(vertical: 14),
+                                          ),
+                                        ),
+                                ),
+                                Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      isBot ? Icons.smart_toy_rounded : Icons.edit_outlined,
+                                      color: isBot ? kGold : Colors.white54,
+                                      size: 19,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    const Text(
+                                      'AVATAR',
+                                      style: TextStyle(fontSize: 7, color: Colors.white38),
+                                    ),
+                                  ],
+                                ),
                                 const SizedBox(width: 12),
                               ],
                             ),
@@ -783,32 +1039,295 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                       }),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  const SectionPanel(
-                    title: 'SPIELMODUS',
-                    child: ModeRow(
-                      selected: true,
-                      title: 'Klassisch',
-                      subtitle: 'Aktuelle Graskönig-Regeln',
-                    ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Avatar antippen, um einen Graskönig-Charakter auszuwählen.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white38, fontSize: 10),
                   ),
                   const SizedBox(height: 18),
                   SizedBox(
                     height: 58,
-                    child: FilledButton(
+                    child: FilledButton.icon(
+                      icon: const Icon(Icons.screen_rotation_rounded),
                       onPressed: () {
-                        final players = List.generate(
+                        final players = List<String>.generate(
                           playerCount,
-                          (index) => controllers[index].text.trim().isEmpty
-                              ? 'Spieler ${index + 1}'
-                              : controllers[index].text.trim(),
+                          (index) {
+                            if (useBot && index == playerCount - 1) {
+                              return 'Kiffer-Karl';
+                            }
+                            return controllers[index].text.trim().isEmpty
+                                ? 'Spieler ${index + 1}'
+                                : controllers[index].text.trim();
+                          },
                         );
+                        final avatars = List<String>.generate(
+                          playerCount,
+                          (index) => kAvatarOptions[avatarSelections[index]].assetPath,
+                        );
+                        final bots = List<bool>.generate(
+                          playerCount,
+                          (index) => useBot && index == playerCount - 1,
+                        );
+
                         Navigator.push(
                           context,
-                          MaterialPageRoute(builder: (_) => GameScreen(players: players)),
+                          MaterialPageRoute(
+                            builder: (_) => LandscapeLaunchScreen(
+                              players: players,
+                              avatarAssets: avatars,
+                              botPlayers: bots,
+                            ),
+                          ),
                         );
                       },
-                      child: const Text('SPIEL STARTEN', style: TextStyle(fontSize: 18)),
+                      label: const Text(
+                        'SPIEL STARTEN',
+                        style: TextStyle(fontSize: 18),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Nach dem Start wechselt das Spiel ins Querformat.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white38, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+class LandscapeLaunchScreen extends StatefulWidget {
+  final List<String> players;
+  final List<String> avatarAssets;
+  final List<bool> botPlayers;
+
+  const LandscapeLaunchScreen({
+    super.key,
+    required this.players,
+    required this.avatarAssets,
+    required this.botPlayers,
+  });
+
+  @override
+  State<LandscapeLaunchScreen> createState() => _LandscapeLaunchScreenState();
+}
+
+class _LandscapeLaunchScreenState extends State<LandscapeLaunchScreen> {
+  bool _viewportReady = false;
+  Orientation? _lastOrientation;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final orientation = MediaQuery.of(context).orientation;
+    if (_lastOrientation != orientation) {
+      _lastOrientation = orientation;
+      _viewportReady = false;
+      if (orientation == Orientation.landscape) {
+        // Safari braucht nach dem Drehen kurz Zeit, bis VisualViewport,
+        // Flutter-Layout und Touch-Koordinaten wieder identisch sind.
+        Future<void>.delayed(const Duration(milliseconds: 650), () {
+          if (mounted && MediaQuery.of(context).orientation == Orientation.landscape) {
+            setState(() => _viewportReady = true);
+          }
+        });
+      }
+    }
+  }
+
+  void _openGame() {
+    if (!_viewportReady) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => GameScreen(
+          players: widget.players,
+          avatarAssets: widget.avatarAssets,
+          botPlayers: widget.botPlayers,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final landscape = MediaQuery.of(context).orientation == Orientation.landscape;
+
+    return Scaffold(
+      body: LeafBackground(
+        child: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      landscape ? Icons.stay_current_landscape_rounded : Icons.screen_rotation_rounded,
+                      size: 62,
+                      color: landscape ? kNeon : kGold,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      landscape ? 'QUERFORMAT ERKANNT' : 'BITTE IPHONE QUER HALTEN',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      landscape
+                          ? (_viewportReady
+                              ? 'Die Touch-Flächen sind jetzt neu ausgerichtet. Du kannst das Spiel starten.'
+                              : 'Einen Moment – Safari richtet die Touch-Flächen neu aus …')
+                          : 'Erst nach dem Drehen wird das Spielfeld geladen. So bleiben Bild und Touch auf dem iPhone deckungsgleich.',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white60, height: 1.35),
+                    ),
+                    const SizedBox(height: 22),
+                    if (landscape)
+                      SizedBox(
+                        width: double.infinity,
+                        height: 58,
+                        child: FilledButton.icon(
+                          onPressed: _viewportReady ? _openGame : null,
+                          icon: _viewportReady
+                              ? const Icon(Icons.play_arrow_rounded)
+                              : const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                          label: Text(
+                            _viewportReady ? 'JETZT SPIELEN' : 'TOUCH WIRD AUSGERICHTET',
+                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class OnlineJoinScreen extends StatefulWidget {
+  const OnlineJoinScreen({super.key});
+
+  @override
+  State<OnlineJoinScreen> createState() => _OnlineJoinScreenState();
+}
+
+class _OnlineJoinScreenState extends State<OnlineJoinScreen> {
+  final TextEditingController roomController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    lockPortraitOrientation();
+  }
+
+  @override
+  void dispose() {
+    roomController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.of(context).orientation == Orientation.landscape) {
+      return const OrientationHintScreen(
+        portrait: true,
+        title: 'BITTE IPHONE HOCHKANT HALTEN',
+        subtitle: 'Den Online-Raumcode gibst du im Hochformat ein.',
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('ONLINE • SPIEL BEITRETEN')),
+      body: LeafBackground(
+        child: SafeArea(
+          top: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: ListView(
+                padding: const EdgeInsets.all(18),
+                children: [
+                  const SizedBox(height: 24),
+                  const Icon(Icons.public_rounded, size: 70, color: kNeon),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'ONLINE-SPIEL',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Hier wird später der Raumcode eines Freundes eingegeben. '
+                    'Jeder Spieler sieht dann nur seine eigene Hand, die Plantagen bleiben für alle sichtbar.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white70, height: 1.4),
+                  ),
+                  const SizedBox(height: 24),
+                  TextField(
+                    controller: roomController,
+                    textCapitalization: TextCapitalization.characters,
+                    textAlign: TextAlign.center,
+                    maxLength: 6,
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 4,
+                    ),
+                    decoration: InputDecoration(
+                      counterText: '',
+                      hintText: 'GK1234',
+                      filled: true,
+                      fillColor: Colors.black26,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    height: 54,
+                    child: FilledButton.icon(
+                      onPressed: () {
+                        showDialog<void>(
+                          context: context,
+                          builder: (_) => AlertDialog(
+                            title: const Text('Online-Multiplayer'),
+                            content: const Text(
+                              'Die Oberfläche ist vorbereitet. Die echte Online-Verbindung '
+                              'bauen wir als nächsten Schritt mit einem Multiplayer-Backend ein.',
+                            ),
+                            actions: [
+                              FilledButton(
+                                onPressed: () => Navigator.pop(context),
+                                child: const Text('OK'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.login_rounded),
+                      label: const Text('RAUM BEITRETEN'),
                     ),
                   ),
                 ],
@@ -1042,8 +1561,15 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
 
 class GameScreen extends StatefulWidget {
   final List<String> players;
+  final List<String> avatarAssets;
+  final List<bool> botPlayers;
 
-  const GameScreen({super.key, required this.players});
+  const GameScreen({
+    super.key,
+    required this.players,
+    required this.avatarAssets,
+    required this.botPlayers,
+  });
 
   @override
   State<GameScreen> createState() => _GameScreenState();
@@ -1069,6 +1595,7 @@ class _GameScreenState extends State<GameScreen> {
   int roundNumber = 1;
   int? selectedCardIndex;
 
+  bool _botBusy = false;
   bool hasDrawn = false;
   bool turnFinished = false;
 
@@ -1080,10 +1607,21 @@ class _GameScreenState extends State<GameScreen> {
   @override
   void initState() {
     super.initState();
+    lockLandscapeOrientation();
     totalScores = List<int>.filled(widget.players.length, 0);
     roundWins = List<int>.filled(widget.players.length, 0);
     startRound();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeRunBotTurn());
   }
+
+  @override
+  void dispose() {
+    lockPortraitOrientation();
+    super.dispose();
+  }
+
+  bool get isBotTurn =>
+      currentPlayer < widget.botPlayers.length && widget.botPlayers[currentPlayer];
 
   // ==========================================================
   // RUNDE STARTEN
@@ -1119,6 +1657,168 @@ class _GameScreenState extends State<GameScreen> {
         }
       }
     }
+  }
+
+  Future<void> _maybeRunBotTurn() async {
+    if (!mounted || _botBusy || !isBotTurn || roundEnding) return;
+
+    _botBusy = true;
+    try {
+      await Future.delayed(const Duration(milliseconds: 650));
+      if (!mounted || !isBotTurn || roundEnding) return;
+
+      if (canKnock() && calculatePoints(currentPlayer) >= 250) {
+        await _botKnock();
+        return;
+      }
+
+      if (!hasDrawn) {
+        if (discardPile.isNotEmpty && _botWantsCard(discardPile.last)) {
+          drawDiscardCard();
+        } else {
+          drawCard();
+        }
+      }
+
+      await Future.delayed(const Duration(milliseconds: 550));
+      if (!mounted || !isBotTurn || roundEnding) return;
+
+      if (!turnFinished) {
+        final bestIndex = _bestBotPlayableIndex();
+        if (bestIndex != null) {
+          setState(() => selectedCardIndex = bestIndex);
+          final card = hands[currentPlayer][bestIndex];
+
+          if (card.type == CardType.grass ||
+              card.type == CardType.energy ||
+              card.type == CardType.base ||
+              (card.type == CardType.action &&
+                  (card.title == 'Dünger' || card.title == 'Übertopf'))) {
+            await playSelectedCard();
+          }
+        }
+      }
+
+      if (!turnFinished && hands[currentPlayer].isNotEmpty) {
+        setState(() {
+          selectedCardIndex = _botDiscardIndex();
+        });
+        discardSelectedCard();
+      }
+
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (mounted && isBotTurn && !roundEnding) {
+        await nextPlayer();
+      }
+    } finally {
+      _botBusy = false;
+      if (mounted && isBotTurn && !roundEnding) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _maybeRunBotTurn());
+      }
+    }
+  }
+
+  bool _botWantsCard(GameCard card) {
+    switch (card.type) {
+      case CardType.grass:
+        return grassSlots[currentPlayer] == null ||
+            card.power > grassSlots[currentPlayer]!.power;
+      case CardType.energy:
+        return energySlots[currentPlayer] == null ||
+            card.power > energySlots[currentPlayer]!.power;
+      case CardType.base:
+        return baseSlots[currentPlayer] == null ||
+            card.power > baseSlots[currentPlayer]!.power;
+      case CardType.action:
+        if (card.title == 'Dünger') {
+          final grass = grassSlots[currentPlayer];
+          return grass != null && grass.power < 200;
+        }
+        if (card.title == 'Übertopf') {
+          return grassSlots[currentPlayer] != null &&
+              !grassProtected[currentPlayer];
+        }
+        return false;
+      case CardType.attack:
+      case CardType.defense:
+        return false;
+    }
+  }
+
+  int? _bestBotPlayableIndex() {
+    int? bestIndex;
+    int bestScore = -999999;
+
+    for (int i = 0; i < hands[currentPlayer].length; i++) {
+      final card = hands[currentPlayer][i];
+      int? score;
+
+      switch (card.type) {
+        case CardType.grass:
+          final current = grassSlots[currentPlayer]?.power ?? 0;
+          if (card.power > current) score = 1000 + card.power - current;
+          break;
+        case CardType.energy:
+          final current = energySlots[currentPlayer]?.power ?? 0;
+          if (card.power > current) score = 900 + (card.power - current) * 2;
+          break;
+        case CardType.base:
+          final current = baseSlots[currentPlayer]?.power ?? 0;
+          if (card.power > current) score = 800 + (card.power - current) * 100;
+          break;
+        case CardType.action:
+          if (card.title == 'Dünger') {
+            final grass = grassSlots[currentPlayer];
+            if (grass != null && grass.power < 200) score = 700;
+          } else if (card.title == 'Übertopf') {
+            if (grassSlots[currentPlayer] != null &&
+                !grassProtected[currentPlayer]) {
+              score = 250;
+            }
+          }
+          break;
+        case CardType.attack:
+        case CardType.defense:
+          break;
+      }
+
+      if (score != null && score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+
+    return bestIndex;
+  }
+
+  int _botDiscardIndex() {
+    for (int i = 0; i < hands[currentPlayer].length; i++) {
+      final card = hands[currentPlayer][i];
+      if (!_botWantsCard(card)) return i;
+    }
+    return 0;
+  }
+
+  Future<void> _botKnock() async {
+    if (!canKnock()) return;
+
+    setState(() {
+      knockActive = true;
+      knockingPlayer = currentPlayer;
+      finalTurnsRemaining
+        ..clear()
+        ..addAll(
+          List.generate(widget.players.length, (i) => i)
+              .where((i) => i != currentPlayer),
+        );
+    });
+
+    GameFeedback.trigger(
+      'sound_knock.wav',
+      haptic: GameHaptic.heavy,
+    );
+    showMessage('🤖 ${widget.players[currentPlayer]} klopft!');
+    await moveToNextFinalPlayer();
   }
 
   // ==========================================================
@@ -1202,7 +1902,7 @@ class _GameScreenState extends State<GameScreen> {
   // ==========================================================
 
   void selectCard(int index) {
-    if (turnFinished) return;
+    if (turnFinished || isBotTurn) return;
     setState(() {
       selectedCardIndex = selectedCardIndex == index ? null : index;
     });
@@ -1572,9 +2272,17 @@ class _GameScreenState extends State<GameScreen> {
     int defenseIndex = -1;
 
     if (defenseIndices.isNotEmpty) {
-      final result = await chooseDefense(target, attack, defenseIndices);
-      if (!mounted) return;
-      defenseIndex = result ?? -1;
+      if (target < widget.botPlayers.length && widget.botPlayers[target]) {
+        defenseIndex = defenseIndices.firstWhere(
+          (index) => hands[target][index].title == 'Alles easy',
+          orElse: () => defenseIndices.first,
+        );
+        await Future.delayed(const Duration(milliseconds: 450));
+      } else {
+        final result = await chooseDefense(target, attack, defenseIndices);
+        if (!mounted) return;
+        defenseIndex = result ?? -1;
+      }
     }
 
     if (defenseIndex >= 0) {
@@ -1945,6 +2653,8 @@ class _GameScreenState extends State<GameScreen> {
     if (skippedPlayers.isNotEmpty) {
       showMessage('${skippedPlayers.join(', ')} setzt aus.');
     }
+
+    _maybeRunBotTurn();
   }
 
   Future<void> moveToNextFinalPlayer() async {
@@ -1990,6 +2700,7 @@ class _GameScreenState extends State<GameScreen> {
       if (skippedPlayers.isNotEmpty) {
         showMessage('${skippedPlayers.join(', ')} setzt den letzten Zug aus.');
       }
+      _maybeRunBotTurn();
       return;
     }
 
@@ -2134,6 +2845,7 @@ class _GameScreenState extends State<GameScreen> {
       roundNumber++;
       startRound();
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeRunBotTurn());
   }
 
   Future<void> showCardZoom(GameCard card) async {
@@ -2369,475 +3081,912 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   // ==========================================================
-  // UI
+  // UI – QUERFORMAT / 3 SPIELER
   // ==========================================================
 
   @override
   Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    if (media.orientation != Orientation.landscape) {
+      return Scaffold(
+        body: LeafBackground(
+          child: SafeArea(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Icon(Icons.screen_rotation_rounded, size: 58, color: kGold),
+                    SizedBox(height: 14),
+                    Text(
+                      'BITTE IPHONE QUER HALTEN',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Graskönig ist ab dieser Version für Querformat optimiert.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white60),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     final hand = hands[currentPlayer];
     final points = calculatePoints(currentPlayer);
     final complete = plantationComplete(currentPlayer);
     final knockReady = canKnock();
     final topDiscard = discardPile.isEmpty ? null : discardPile.last;
+    final opponents = <int>[
+      for (int i = 0; i < widget.players.length; i++)
+        if (i != currentPlayer) i,
+    ];
+
+    Widget playerPanel(int player, {required bool reverse}) {
+      return LandscapePlayerPanel(
+        playerIndex: player,
+        avatarAsset: widget.avatarAssets[player],
+        name: widget.players[player],
+        score: totalScores[player],
+        grass: grassSlots[player],
+        energy: energySlots[player],
+        base: baseSlots[player],
+        grassProtected: grassProtected[player],
+        reverse: reverse,
+        onTap: () => showPlayerPlantation(player),
+        onCardTap: (card) {
+          if (card != null) showCardZoom(card);
+        },
+      );
+    }
 
     return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.menu_rounded),
-          onPressed: () {
-            showModalBottomSheet<void>(
-              context: context,
-              backgroundColor: const Color(0xFF091E14),
-              builder: (_) => SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ListTile(
-                        leading: const Icon(Icons.menu_book_outlined),
-                        title: const Text('Regeln ansehen'),
-                        onTap: () {
-                          Navigator.pop(context);
-                          Navigator.push(context, MaterialPageRoute(builder: (_) => const RulesScreen()));
-                        },
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.style_outlined),
-                        title: const Text('Kartenübersicht'),
-                        onTap: () {
-                          Navigator.pop(context);
-                          Navigator.push(context, MaterialPageRoute(builder: (_) => const CardsOverviewScreen()));
-                        },
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.settings_outlined),
-                        title: const Text('Ton & Vibration'),
-                        onTap: () {
-                          Navigator.pop(context);
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => const SettingsScreen()),
-                          );
-                        },
-                      ),
-                      const Divider(color: Colors.white12),
-                      ListTile(
-                        leading: const Icon(
-                          Icons.flag_outlined,
-                          color: Color(0xFFFF6B6B),
-                        ),
-                        title: const Text(
-                          'Spiel aufgeben',
-                          style: TextStyle(
-                            color: Color(0xFFFF8A80),
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        subtitle: const Text(
-                          'Zurück zum Hauptmenü',
-                          style: TextStyle(color: Colors.white54),
-                        ),
-                        onTap: () {
-                          Navigator.pop(context);
-                          Future.delayed(
-                            Duration.zero,
-                            confirmGiveUp,
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-        title: Column(
-          children: [
-            Text(
-              'RUNDE $roundNumber/4',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
-            ),
-            const Text(
-              'BAUE DEINE PLANTAGE',
-              style: TextStyle(fontSize: 9, color: Colors.white54, letterSpacing: 1),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const CardsOverviewScreen()),
-            ),
-            icon: const Icon(Icons.style_outlined),
-          ),
-        ],
-      ),
-      bottomNavigationBar: Material(
-        color: kBg,
-        elevation: 18,
+      body: LeafBackground(
         child: SafeArea(
-          top: false,
-          minimum: const EdgeInsets.fromLTRB(12, 5, 12, 20),
-          child: Center(
-            heightFactor: 1,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 430),
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 180),
-                child: turnFinished
-                    ? SizedBox(
-                        key: const ValueKey('next'),
-                        width: double.infinity,
-                        height: 47,
-                        child: FilledButton.tonal(
-                          onPressed: nextPlayer,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            child: Text(
-                              knockActive
-                                  ? 'LETZTEN ZUG BEENDEN'
-                                  : 'NÄCHSTER SPIELER',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w900,
-                              ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final veryLow = constraints.maxHeight < 350;
+              final topHeight = veryLow ? 72.0 : 82.0;
+              final centerHeight = veryLow ? 108.0 : 120.0;
+              final handHeight = max(110.0, constraints.maxHeight - topHeight - centerHeight - 18);
+
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+                      child: Column(
+                        children: [
+                          SizedBox(
+                            height: topHeight,
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: opponents.isNotEmpty
+                                      ? playerPanel(opponents.first, reverse: false)
+                                      : const SizedBox.shrink(),
+                                ),
+                                const SizedBox(width: 8),
+                                SizedBox(
+                                  width: veryLow ? 116 : 132,
+                                  child: RoundCenterBadge(
+                                    roundNumber: roundNumber,
+                                    currentTurn: completedTurns[currentPlayer] + 1,
+                                    deckRemaining: deck.length,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: opponents.length > 1
+                                      ? playerPanel(opponents[1], reverse: true)
+                                      : const SizedBox.shrink(),
+                                ),
+                              ],
                             ),
                           ),
-                        ),
-                      )
-                    : Row(
-                        key: const ValueKey('actions'),
-                        children: [
+                          const SizedBox(height: 4),
+                          SizedBox(
+                            height: centerHeight,
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Expanded(
+                                  flex: 10,
+                                  child: CurrentPlantationPanel(
+                                    playerIndex: currentPlayer,
+                                    avatarAsset: widget.avatarAssets[currentPlayer],
+                                    name: widget.players[currentPlayer],
+                                    score: points,
+                                    grass: grassSlots[currentPlayer],
+                                    energy: energySlots[currentPlayer],
+                                    base: baseSlots[currentPlayer],
+                                    grassProtected: grassProtected[currentPlayer],
+                                    onCardTap: (card) {
+                                      if (card != null) showCardZoom(card);
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  flex: 8,
+                                  child: CenterCardTable(
+                                    deckRemaining: deck.length,
+                                    canDraw: !isBotTurn && !hasDrawn && deck.isNotEmpty,
+                                    onDraw: drawCard,
+                                    topDiscard: topDiscard,
+                                    canTakeDiscard: !isBotTurn && !hasDrawn && topDiscard != null,
+                                    onTakeDiscard: drawDiscardCard,
+                                    onZoomDiscard: topDiscard == null
+                                        ? null
+                                        : () => showCardZoom(topDiscard),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  flex: 7,
+                                  child: LandscapeActionPanel(
+                                    botTurn: isBotTurn,
+                                    turnFinished: turnFinished,
+                                    knockActive: knockActive,
+                                    knockReady: knockReady,
+                                    complete: complete,
+                                    completedTurns: completedTurns[currentPlayer],
+                                    onPlay: playSelectedCard,
+                                    onDiscard: discardSelectedCard,
+                                    onKnock: knock,
+                                    onNext: nextPlayer,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 4),
                           Expanded(
-                            child: SizedBox(
-                              height: 47,
-                              child: FilledButton(
-                                onPressed: playSelectedCard,
-                                child: const FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  child: Text(
-                                    'KARTE AUSSPIELEN',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w900,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: const Color(0xB8061B11),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(color: Colors.white12),
+                              ),
+                              padding: const EdgeInsets.fromLTRB(8, 4, 8, 2),
+                              child: Row(
+                                children: [
+                                  SizedBox(
+                                    width: veryLow ? 98 : 112,
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        GraskoenigAvatar(
+                                          playerIndex: currentPlayer,
+                                          assetPath: widget.avatarAssets[currentPlayer],
+                                          size: veryLow ? 42 : 50,
+                                          borderColor: playerAccent(currentPlayer),
+                                          active: true,
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Text(
+                                          widget.players[currentPlayer],
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                        ),
+                                        Text(
+                                          hasDrawn ? 'KARTE SPIELEN' : 'ZUERST ZIEHEN',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            fontSize: 8,
+                                            fontWeight: FontWeight.w800,
+                                            color: hasDrawn ? kNeon : kGold,
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          SizedBox(
-                            width: 96,
-                            height: 47,
-                            child: OutlinedButton(
-                              onPressed: discardSelectedCard,
-                              child: const FittedBox(
-                                fit: BoxFit.scaleDown,
-                                child: Text(
-                                  'ABLEGEN',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w800,
+                                  Expanded(
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        if (knockActive)
+                                          Padding(
+                                            padding: const EdgeInsets.only(bottom: 2),
+                                            child: Text(
+                                              '👊 ${widget.players[knockingPlayer!]} hat geklopft – letzter Zug!',
+                                              textAlign: TextAlign.center,
+                                              style: const TextStyle(
+                                                color: kGold,
+                                                fontSize: 9,
+                                                fontWeight: FontWeight.w900,
+                                              ),
+                                            ),
+                                          ),
+                                        Expanded(
+                                          child: HandFan(
+                                            hand: hand,
+                                            selectedIndex: selectedCardIndex,
+                                            onSelect: selectCard,
+                                            onZoom: showCardZoom,
+                                            cardWidth: veryLow ? 72 : 82,
+                                            cardHeight: veryLow ? 104 : 120,
+                                            fanHeight: handHeight,
+                                            minStep: veryLow ? 30 : 34,
+                                          ),
+                                        ),
+                                        if (selectedCardIndex != null)
+                                          Text(
+                                            'Ausgewählt: ${hand[selectedCardIndex!].title}',
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(
+                                              color: kGold,
+                                              fontSize: 8.5,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
                                   ),
-                                ),
+                                ],
                               ),
                             ),
                           ),
                         ],
                       ),
-              ),
-            ),
-          ),
-        ),
-      ),
-      body: LeafBackground(
-        child: SafeArea(
-          top: false,
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 430),
-              child: ListView(
-                physics: const NeverScrollableScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(12, 5, 12, 3),
-                children: [
-                  SizedBox(
-                    height: 55,
-                    child: ListView.separated(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: widget.players.length,
-                      separatorBuilder: (_, __) => const SizedBox(width: 7),
-                      itemBuilder: (_, index) {
-                        final active = index == currentPlayer;
-                        final color = playerAccent(index);
-                        return GestureDetector(
-                          onTap: () => showPlayerPlantation(index),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 180),
-                            width: 92,
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: active ? color.withOpacity(0.18) : const Color(0xCC092116),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: active ? color : Colors.white12, width: active ? 2 : 1),
-                            ),
-                            child: Row(
-                              children: [
-                              CircleAvatar(
-                                radius: 14,
-                                backgroundColor: color,
-                                child: active
-                                    ? const Text('👑', style: TextStyle(fontSize: 14))
-                                    : const Icon(Icons.person, color: Colors.black87, size: 17),
-                              ),
-                              const SizedBox(width: 6),
-                              Expanded(
+                    ),
+                  ),
+                  Positioned(
+                    left: 10,
+                    top: 8,
+                    child: Material(
+                      color: const Color(0xDD071B12),
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        tooltip: 'Menü',
+                        iconSize: 20,
+                        onPressed: () {
+                          showModalBottomSheet<void>(
+                            context: context,
+                            backgroundColor: const Color(0xFF091E14),
+                            builder: (_) => SafeArea(
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
                                 child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Text(
-                                      widget.players[index],
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+                                    ListTile(
+                                      leading: const Icon(Icons.menu_book_outlined),
+                                      title: const Text('Regeln ansehen'),
+                                      onTap: () {
+                                        Navigator.pop(context);
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(builder: (_) => const RulesScreen()),
+                                        );
+                                      },
                                     ),
-                                    Text(
-                                      '${totalScores[index]} P',
-                                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: active ? kGold : Colors.white60),
+                                    ListTile(
+                                      leading: const Icon(Icons.style_outlined),
+                                      title: const Text('Kartenübersicht'),
+                                      onTap: () {
+                                        Navigator.pop(context);
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(builder: (_) => const CardsOverviewScreen()),
+                                        );
+                                      },
+                                    ),
+                                    ListTile(
+                                      leading: const Icon(Icons.settings_outlined),
+                                      title: const Text('Ton & Vibration'),
+                                      onTap: () {
+                                        Navigator.pop(context);
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                                        );
+                                      },
+                                    ),
+                                    const Divider(color: Colors.white12),
+                                    ListTile(
+                                      leading: const Icon(Icons.flag_outlined, color: Color(0xFFFF6B6B)),
+                                      title: const Text(
+                                        'Spiel aufgeben',
+                                        style: TextStyle(
+                                          color: Color(0xFFFF8A80),
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                      onTap: () {
+                                        Navigator.pop(context);
+                                        Future.delayed(Duration.zero, confirmGiveUp);
+                                      },
                                     ),
                                   ],
                                 ),
                               ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                    ),
-                  ),
-
-                  if (knockActive) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(9),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF6B3D00),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: kGold),
-                      ),
-                      child: Text(
-                        '👊 ${widget.players[knockingPlayer!]} hat geklopft – letzter Zug!',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900),
-                      ),
-                    ),
-                  ],
-
-                  const SizedBox(height: 10),
-                  Text(
-                    'Dein Zug, ${widget.players[currentPlayer]}',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: kCream),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Eigener Zug ${completedTurns[currentPlayer] + 1} • ${deck.length} Karten übrig',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 10, color: Colors.white54),
-                  ),
-
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Column(
-                        children: [
-                          CardBackStack(
-                            remaining: deck.length,
-                            enabled: !hasDrawn && deck.isNotEmpty,
-                            onTap: drawCard,
-                          ),
-                          const SizedBox(height: 4),
-                          const Text('STAPEL', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                      const SizedBox(width: 24),
-                      DiscardStack(
-                        card: topDiscard,
-                        enabled: !hasDrawn && topDiscard != null,
-                        onTake: drawDiscardCard,
-                        onZoom: topDiscard == null
-                            ? null
-                            : () => showCardZoom(topDiscard),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 5),
-                  const Text(
-                    'Ziehe vom Stapel oder nimm die oberste offene Ablage.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 9,
-                      color: Colors.white38,
-                    ),
-                  ),
-
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: SizedBox(
-                          height: 45,
-                          child: FilledButton.icon(
-                            onPressed: !hasDrawn && deck.isNotEmpty ? drawCard : null,
-                            icon: const Icon(Icons.add_card, size: 18),
-                            label: Text(hasDrawn ? 'KARTE GEZOGEN' : 'KARTE ZIEHEN'),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: SizedBox(
-                          height: 45,
-                          child: PulseScale(
-                            active: knockReady && !knockActive,
-                            minScale: 1.0,
-                            maxScale: 1.045,
-                            duration: const Duration(milliseconds: 650),
-                            child: OutlinedButton.icon(
-                              style: knockReady && !knockActive
-                                  ? OutlinedButton.styleFrom(
-                                      side: const BorderSide(color: kGold, width: 2),
-                                      foregroundColor: kGold,
-                                    )
-                                  : null,
-                              onPressed: knockActive ? null : knock,
-                              icon: const Text('👊'),
-                              label: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                child: Text(
-                                  knockActive
-                                      ? 'GEKLOPFT'
-                                      : completedTurns[currentPlayer] < 2
-                                          ? 'KLOPFEN AB ZUG 3'
-                                          : !complete
-                                              ? 'PLANTAGE FEHLT'
-                                              : knockReady
-                                                  ? 'ICH KLOPFE!'
-                                                  : 'KLOPFEN',
-                                ),
-                              ),
                             ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 6),
-                  const Text(
-                    'DEINE PLANTAGE',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, letterSpacing: 1),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Expanded(child: PlantSlot(icon: '🌿', title: 'GRAS', card: grassSlots[currentPlayer], protected: grassProtected[currentPlayer])),
-                      const SizedBox(width: 7),
-                      Expanded(child: PlantSlot(icon: '⚡', title: 'ENERGIE', card: energySlots[currentPlayer])),
-                      const SizedBox(width: 7),
-                      Expanded(child: PlantSlot(icon: '👑', title: 'BASIS', card: baseSlots[currentPlayer])),
-                    ],
-                  ),
-                  const SizedBox(height: 7),
-                  Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
-                      decoration: BoxDecoration(
-                        color: points > 0 ? const Color(0xFF173A20) : const Color(0xFF0C2A1A),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: points > 0 ? kNeon.withOpacity(0.55) : Colors.white12),
-                      ),
-                      child: Text(
-                        points == 0 ? 'Plantage noch nicht vollständig' : '$points PUNKTE',
-                        style: TextStyle(
-                          color: points == 0 ? Colors.white54 : kNeon,
-                          fontWeight: FontWeight.w900,
-                          fontSize: points == 0 ? 10 : 15,
-                        ),
+                          );
+                        },
+                        icon: const Icon(Icons.menu_rounded),
                       ),
                     ),
                   ),
-
-                  const SizedBox(height: 6),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        hand.length > handLimit
-                            ? 'DEINE HAND • ${hand.length} KARTEN • 1 MUSS WEG'
-                            : 'DEINE HAND • ${hand.length} KARTEN',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w900,
-                          color: hand.length > handLimit ? kGold : Colors.white,
-                        ),
-                      ),
-                      const Text(
-                        'ALLE SICHTBAR',
-                        style: TextStyle(fontSize: 9, color: Colors.white38),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 320),
-                    switchInCurve: Curves.easeOutBack,
-                    switchOutCurve: Curves.easeIn,
-                    transitionBuilder: (child, animation) {
-                      final slide = Tween<Offset>(
-                        begin: const Offset(0.08, 0),
-                        end: Offset.zero,
-                      ).animate(animation);
-                      return FadeTransition(
-                        opacity: animation,
-                        child: SlideTransition(
-                          position: slide,
-                          child: child,
-                        ),
-                      );
-                    },
-                    child: KeyedSubtree(
-                      key: ValueKey(
-                        '${currentPlayer}_${hand.length}_${hand.map((card) => card.title).join('|')}',
-                      ),
-                      child: HandFan(
-                        hand: hand,
-                        selectedIndex: selectedCardIndex,
-                        onSelect: selectCard,
-                        onZoom: showCardZoom,
-                      ),
-                    ),
-                  ),
-
-                  if (selectedCardIndex != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        'Ausgewählt: ${hand[selectedCardIndex!].title}',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: kGold,
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
                 ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+}
+
+
+class GraskoenigAvatar extends StatelessWidget {
+  final int playerIndex;
+  final String? assetPath;
+  final double size;
+  final Color borderColor;
+  final bool active;
+
+  const GraskoenigAvatar({
+    super.key,
+    required this.playerIndex,
+    this.assetPath,
+    required this.size,
+    required this.borderColor,
+    this.active = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: active ? kGold : borderColor, width: active ? 3 : 2),
+        boxShadow: active
+            ? const [BoxShadow(color: Color(0x6659FF7C), blurRadius: 10)]
+            : null,
+      ),
+      child: ClipOval(
+        child: Image.asset(
+          assetPath ?? playerAvatarAsset(playerIndex),
+          fit: BoxFit.cover,
+          alignment: Alignment.topCenter,
+          errorBuilder: (_, __, ___) => Container(
+            color: borderColor,
+            alignment: Alignment.center,
+            child: const Icon(Icons.person, color: Colors.black87),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class MiniPlantCard extends StatelessWidget {
+  final String label;
+  final String icon;
+  final GameCard? card;
+  final bool protected;
+  final ValueChanged<GameCard?>? onTap;
+
+  const MiniPlantCard({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.card,
+    this.protected = false,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: card == null || onTap == null ? null : () => onTap!(card),
+      child: Container(
+        width: 52,
+        height: 64,
+        decoration: BoxDecoration(
+          color: const Color(0xFF0A291A),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: protected ? Colors.lightBlueAccent : Colors.white24,
+            width: protected ? 2 : 1,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: card?.assetPath != null
+                  ? Image.asset(
+                      card!.assetPath!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Center(
+                        child: Text(icon, style: const TextStyle(fontSize: 21)),
+                      ),
+                    )
+                  : Center(
+                      child: Text(icon, style: const TextStyle(fontSize: 21, color: Colors.white30)),
+                    ),
+            ),
+            Positioned(
+              left: 2,
+              right: 2,
+              bottom: 2,
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: const Color(0xD8071B12),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  card == null ? label : card!.value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 7.5, fontWeight: FontWeight.w900),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class LandscapePlayerPanel extends StatelessWidget {
+  final int playerIndex;
+  final String avatarAsset;
+  final String name;
+  final int score;
+  final GameCard? grass;
+  final GameCard? energy;
+  final GameCard? base;
+  final bool grassProtected;
+  final bool reverse;
+  final VoidCallback onTap;
+  final ValueChanged<GameCard?> onCardTap;
+
+  const LandscapePlayerPanel({
+    super.key,
+    required this.playerIndex,
+    required this.avatarAsset,
+    required this.name,
+    required this.score,
+    required this.grass,
+    required this.energy,
+    required this.base,
+    required this.grassProtected,
+    required this.reverse,
+    required this.onTap,
+    required this.onCardTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = playerAccent(playerIndex);
+    final avatarBlock = GestureDetector(
+      onTap: onTap,
+      child: SizedBox(
+        width: 86,
+        child: Row(
+          mainAxisAlignment: reverse ? MainAxisAlignment.end : MainAxisAlignment.start,
+          children: [
+            if (reverse) ...[
+              Flexible(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900)),
+                    Text('$score P', style: const TextStyle(fontSize: 9, color: kGold, fontWeight: FontWeight.w900)),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 5),
+            ],
+            GraskoenigAvatar(playerIndex: playerIndex, assetPath: avatarAsset, size: 42, borderColor: accent),
+            if (!reverse) ...[
+              const SizedBox(width: 5),
+              Flexible(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900)),
+                    Text('$score P', style: const TextStyle(fontSize: 9, color: kGold, fontWeight: FontWeight.w900)),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+
+    final plantation = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        MiniPlantCard(label: 'GRAS', icon: '🌿', card: grass, protected: grassProtected, onTap: onCardTap),
+        const SizedBox(width: 4),
+        MiniPlantCard(label: 'ENERGIE', icon: '⚡', card: energy, onTap: onCardTap),
+        const SizedBox(width: 4),
+        MiniPlantCard(label: 'BASIS', icon: '👑', card: base, onTap: onCardTap),
+      ],
+    );
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xD9092116),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withOpacity(0.6)),
+      ),
+      child: Row(
+        mainAxisAlignment: reverse ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: reverse
+            ? [Expanded(child: Align(alignment: Alignment.centerRight, child: plantation)), const SizedBox(width: 7), avatarBlock]
+            : [avatarBlock, const SizedBox(width: 7), Expanded(child: Align(alignment: Alignment.centerLeft, child: plantation))],
+      ),
+    );
+  }
+}
+
+class CurrentPlantationPanel extends StatelessWidget {
+  final int playerIndex;
+  final String avatarAsset;
+  final String name;
+  final int score;
+  final GameCard? grass;
+  final GameCard? energy;
+  final GameCard? base;
+  final bool grassProtected;
+  final ValueChanged<GameCard?> onCardTap;
+
+  const CurrentPlantationPanel({
+    super.key,
+    required this.playerIndex,
+    required this.avatarAsset,
+    required this.name,
+    required this.score,
+    required this.grass,
+    required this.energy,
+    required this.base,
+    required this.grassProtected,
+    required this.onCardTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(7),
+      decoration: BoxDecoration(
+        color: const Color(0xE60A2518),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: playerAccent(playerIndex).withOpacity(0.7)),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Row(
+            children: [
+              GraskoenigAvatar(playerIndex: playerIndex, assetPath: avatarAsset, size: 34, borderColor: playerAccent(playerIndex), active: true),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('DEINE PLANTAGE • $name', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900)),
+                    Text(score == 0 ? 'noch nicht vollständig' : '$score PUNKTE', style: TextStyle(fontSize: 9, color: score == 0 ? Colors.white54 : kNeon, fontWeight: FontWeight.w900)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              MiniPlantCard(label: 'GRAS', icon: '🌿', card: grass, protected: grassProtected, onTap: onCardTap),
+              const SizedBox(width: 5),
+              MiniPlantCard(label: 'ENERGIE', icon: '⚡', card: energy, onTap: onCardTap),
+              const SizedBox(width: 5),
+              MiniPlantCard(label: 'BASIS', icon: '👑', card: base, onTap: onCardTap),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class RoundCenterBadge extends StatelessWidget {
+  final int roundNumber;
+  final int currentTurn;
+  final int deckRemaining;
+
+  const RoundCenterBadge({
+    super.key,
+    required this.roundNumber,
+    required this.currentTurn,
+    required this.deckRemaining,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xE6092116),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kGold.withOpacity(0.55)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text('RUNDE $roundNumber/4', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: kGold)),
+          Text('ZUG $currentTurn', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800)),
+          Text('$deckRemaining Karten', style: const TextStyle(fontSize: 8, color: Colors.white54)),
+        ],
+      ),
+    );
+  }
+}
+
+class CenterCardTable extends StatelessWidget {
+  final int deckRemaining;
+  final bool canDraw;
+  final VoidCallback onDraw;
+  final GameCard? topDiscard;
+  final bool canTakeDiscard;
+  final VoidCallback onTakeDiscard;
+  final VoidCallback? onZoomDiscard;
+
+  const CenterCardTable({
+    super.key,
+    required this.deckRemaining,
+    required this.canDraw,
+    required this.onDraw,
+    required this.topDiscard,
+    required this.canTakeDiscard,
+    required this.onTakeDiscard,
+    this.onZoomDiscard,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xAA04130C),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: CardBackStack(
+                remaining: deckRemaining,
+                enabled: canDraw,
+                onTap: onDraw,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: DiscardStack(
+                card: topDiscard,
+                enabled: canTakeDiscard,
+                onTake: onTakeDiscard,
+                onZoom: onZoomDiscard,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class LandscapeActionPanel extends StatelessWidget {
+  final bool botTurn;
+  final bool turnFinished;
+  final bool knockActive;
+  final bool knockReady;
+  final bool complete;
+  final int completedTurns;
+  final VoidCallback onPlay;
+  final VoidCallback onDiscard;
+  final VoidCallback onKnock;
+  final VoidCallback onNext;
+
+  const LandscapeActionPanel({
+    super.key,
+    required this.botTurn,
+    required this.turnFinished,
+    required this.knockActive,
+    required this.knockReady,
+    required this.complete,
+    required this.completedTurns,
+    required this.onPlay,
+    required this.onDiscard,
+    required this.onKnock,
+    required this.onNext,
+  });
+
+  String get knockLabel {
+    if (knockActive) return 'GEKLOPFT';
+    if (completedTurns < 2) return 'KLOPFEN AB ZUG 3';
+    if (!complete) return 'PLANTAGE FEHLT';
+    if (knockReady) return '👊 ICH KLOPFE!';
+    return 'KLOPFEN';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(7),
+      decoration: BoxDecoration(
+        color: const Color(0xE6092116),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: botTurn
+          ? const Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.smart_toy_rounded, color: kGold, size: 32),
+                SizedBox(height: 6),
+                Text(
+                  'BOT DENKT…',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontWeight: FontWeight.w900, color: kGold),
+                ),
+                SizedBox(height: 3),
+                Text(
+                  'Kiffer-Karl ist am Zug',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 9, color: Colors.white54),
+                ),
+              ],
+            )
+          : turnFinished
+          ? SizedBox.expand(
+              child: FastTouchButton(
+                label: knockActive ? 'LETZTEN ZUG BEENDEN' : 'NÄCHSTER SPIELER',
+                onTap: onNext,
+                filled: true,
+              ),
+            )
+          : Column(
+              children: [
+                Expanded(
+                  child: FastTouchButton(
+                    label: 'KARTE AUSSPIELEN',
+                    onTap: onPlay,
+                    filled: true,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Expanded(
+                  child: FastTouchButton(
+                    label: 'ABLEGEN',
+                    onTap: onDiscard,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Expanded(
+                  child: FastTouchButton(
+                    label: knockLabel,
+                    onTap: knockActive ? null : onKnock,
+                    accent: knockReady && !knockActive ? kGold : null,
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+
+class FastTouchButton extends StatefulWidget {
+  final String label;
+  final VoidCallback? onTap;
+  final bool filled;
+  final Color? accent;
+
+  const FastTouchButton({
+    super.key,
+    required this.label,
+    required this.onTap,
+    this.filled = false,
+    this.accent,
+  });
+
+  @override
+  State<FastTouchButton> createState() => _FastTouchButtonState();
+}
+
+class _FastTouchButtonState extends State<FastTouchButton> {
+  bool _pressed = false;
+  bool _locked = false;
+
+  void _fire() {
+    if (widget.onTap == null || _locked) return;
+    _locked = true;
+    widget.onTap!();
+    Future<void>.delayed(const Duration(milliseconds: 220), () {
+      if (mounted) _locked = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = widget.onTap != null;
+    final accent = widget.accent ?? (widget.filled ? kNeon : Colors.white38);
+
+    // Keine Transform-/Scale-Animation auf interaktiven Flächen.
+    // Das vermeidet auf Safari nach einer Drehung versetzte Hit-Tests.
+    return SizedBox.expand(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: enabled ? _fire : null,
+          onHighlightChanged: enabled
+              ? (value) {
+                  if (mounted) setState(() => _pressed = value);
+                }
+              : null,
+          borderRadius: BorderRadius.circular(12),
+          splashColor: accent.withValues(alpha: 0.18),
+          highlightColor: accent.withValues(alpha: 0.10),
+          child: Container(
+            width: double.infinity,
+            height: double.infinity,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: !enabled
+                  ? Colors.white.withValues(alpha: 0.05)
+                  : widget.filled
+                      ? (_pressed ? const Color(0xFF128A2F) : const Color(0xFF16A638))
+                      : (_pressed ? const Color(0x55000000) : const Color(0x42000000)),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: enabled ? accent : Colors.white12,
+                width: widget.accent != null ? 2 : 1.2,
+              ),
+            ),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                widget.label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  color: !enabled ? Colors.white30 : widget.accent ?? Colors.white,
+                ),
               ),
             ),
           ),
@@ -2845,7 +3994,6 @@ class _GameScreenState extends State<GameScreen> {
       ),
     );
   }
-
 }
 
 class FinalScoreScreen extends StatelessWidget {
@@ -3365,10 +4513,12 @@ class DiscardStack extends StatelessWidget {
         Stack(
           clipBehavior: Clip.none,
           children: [
-            GestureDetector(
-              onTap: enabled ? onTake : null,
-              onLongPress: onZoom,
-              child: AnimatedContainer(
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: enabled ? onTake : null,
+                borderRadius: BorderRadius.circular(10),
+                child: AnimatedContainer(
                 duration: const Duration(milliseconds: 180),
                 width: 70,
                 height: 104,
@@ -3406,14 +4556,16 @@ class DiscardStack extends StatelessWidget {
                                 CardFallbackLarge(card: card!),
                           )
                         : CardFallbackLarge(card: card!),
+                ),
               ),
             ),
             if (card != null && onZoom != null)
               Positioned(
                 right: -5,
                 top: -5,
-                child: GestureDetector(
-                  onTap: onZoom,
+                child: Listener(
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: onZoom == null ? null : (_) => onZoom!(),
                   child: Container(
                     width: 25,
                     height: 25,
@@ -3434,7 +4586,7 @@ class DiscardStack extends StatelessWidget {
         ),
         const SizedBox(height: 4),
         Text(
-          enabled ? 'ABLAGE NEHMEN' : 'ABLAGE',
+          enabled ? 'ABLAGE • ANTIPPEN' : 'ABLAGE',
           style: TextStyle(
             fontSize: 8.5,
             fontWeight: FontWeight.bold,
@@ -3492,37 +4644,52 @@ class CardBackStack extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: PulseScale(
-        active: enabled,
-        minScale: 1.0,
-        maxScale: 1.025,
-        duration: const Duration(milliseconds: 900),
-        child: Opacity(
-          opacity: enabled ? 1 : 0.52,
-          child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: 68,
-              height: 88,
-              child: Stack(
-                children: [
-                  Positioned(left: 10, top: 0, width: 54, height: 81, child: backCard()),
-                  Positioned(left: 6, top: 3, width: 54, height: 81, child: backCard()),
-                  Positioned(left: 2, top: 6, width: 54, height: 81, child: backCard()),
-                ],
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Nur der sichtbare Kartenrücken ist der Zieh-Button.
+        // Die komplette Kartenfläche reagiert auf einen Tap.
+        SizedBox(
+          width: 72,
+          height: 92,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: enabled ? onTap : null,
+              borderRadius: BorderRadius.circular(10),
+              child: Opacity(
+                opacity: enabled ? 1 : 0.52,
+                child: Stack(
+                  children: [
+                    Positioned(left: 12, top: 0, width: 56, height: 84, child: backCard()),
+                    Positioned(left: 7, top: 4, width: 56, height: 84, child: backCard()),
+                    Positioned(left: 2, top: 8, width: 56, height: 84, child: backCard()),
+                    if (enabled)
+                      Positioned.fill(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: kGold.withValues(alpha: 0.55)),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
-            Text(
-              enabled ? 'ZIEHEN • $remaining' : 'GEZOGEN • $remaining',
-              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
-            ),
-          ],
+          ),
         ),
+        const SizedBox(height: 3),
+        Text(
+          enabled ? 'ZIEHSTAPEL • KARTE ANTIPPEN • $remaining' : 'GEZOGEN • $remaining',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 9.5,
+            fontWeight: FontWeight.bold,
+            color: enabled ? kGold : Colors.white54,
+          ),
         ),
-      ),
+      ],
     );
   }
 }
@@ -3583,6 +4750,10 @@ class HandFan extends StatelessWidget {
   final int? selectedIndex;
   final ValueChanged<int> onSelect;
   final ValueChanged<GameCard> onZoom;
+  final double cardWidth;
+  final double cardHeight;
+  final double fanHeight;
+  final double minStep;
 
   const HandFan({
     super.key,
@@ -3590,6 +4761,10 @@ class HandFan extends StatelessWidget {
     required this.selectedIndex,
     required this.onSelect,
     required this.onZoom,
+    this.cardWidth = 104,
+    this.cardHeight = 154,
+    this.fanHeight = 166,
+    this.minStep = 38,
   });
 
   @override
@@ -3606,62 +4781,105 @@ class HandFan extends StatelessWidget {
       );
     }
 
-    const cardWidth = 104.0;
-    const cardHeight = 154.0;
-    const topPadding = 6.0;
+    const topPadding = 4.0;
 
     return SizedBox(
-      height: 166,
+      height: fanHeight,
       child: LayoutBuilder(
         builder: (context, constraints) {
           final count = hand.length;
           final maxWidth = constraints.maxWidth;
-
-          // Bei wenigen Karten stehen sie fast nebeneinander. Ab 4 Karten
-          // überlappen sie wie ein echter Kartenfächer, sodass jede Karte
-          // zumindest sichtbar und antippbar bleibt.
           final naturalStep = cardWidth + 8;
-          final fitStep = count <= 1
-              ? 0.0
-              : (maxWidth - cardWidth) / (count - 1);
-          final step = count <= 1
-              ? 0.0
-              : min(naturalStep, max(38.0, fitStep));
-
+          final fitStep = count <= 1 ? 0.0 : (maxWidth - cardWidth) / (count - 1);
+          final step = count <= 1 ? 0.0 : min(naturalStep, max(minStep, fitStep));
           final totalWidth = cardWidth + step * (count - 1);
           final startLeft = max(0.0, (maxWidth - totalWidth) / 2);
 
-          final normalChildren = <Widget>[];
-          Widget? selectedChild;
+          final visualCards = <Widget>[];
+          Widget? selectedVisual;
 
           for (int index = 0; index < count; index++) {
-            final child = Positioned(
+            final visual = Positioned(
               left: startLeft + (step * index),
-              top: topPadding,
+              top: selectedIndex == index ? 0 : topPadding,
               width: cardWidth,
               height: cardHeight,
-              child: GameCardWidget(
-                card: hand[index],
-                selected: selectedIndex == index,
-                onTap: () => onSelect(index),
-                onZoom: () => onZoom(hand[index]),
+              child: IgnorePointer(
+                child: GameCardWidget(
+                  card: hand[index],
+                  selected: selectedIndex == index,
+                  onTap: () {},
+                  onZoom: () {},
+                  width: cardWidth,
+                ),
               ),
             );
-
-            // Die ausgewählte Karte wird zuletzt gezeichnet und liegt dadurch
-            // sichtbar über den anderen Karten.
             if (selectedIndex == index) {
-              selectedChild = child;
+              selectedVisual = visual;
             } else {
-              normalChildren.add(child);
+              visualCards.add(visual);
             }
           }
+
+          // Separate unsichtbare Touch-Zonen verhindern auf iPhone/Safari,
+          // dass sich überlappende Karten gegenseitig die Berührung wegnehmen.
+          final hitZones = <Widget>[];
+          for (int index = 0; index < count; index++) {
+            final visibleWidth = index == count - 1 ? cardWidth : max(step, 44.0);
+            hitZones.add(
+              Positioned(
+                left: startLeft + (step * index),
+                top: 0,
+                width: visibleWidth,
+                height: cardHeight + 10,
+                child: Listener(
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: (_) => onSelect(index),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onDoubleTap: () => onZoom(hand[index]),
+                    onLongPress: () => onZoom(hand[index]),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+            );
+          }
+
+          // Große Zoom-Fläche für die aktuell gewählte Karte.
+          final selectedZoom = selectedIndex == null
+              ? const <Widget>[]
+              : <Widget>[
+                  Positioned(
+                    left: min(
+                      maxWidth - 38,
+                      startLeft + (step * selectedIndex!) + cardWidth - 34,
+                    ),
+                    top: 2,
+                    width: 38,
+                    height: 38,
+                    child: Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: (_) => onZoom(hand[selectedIndex!]),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xDD071B12),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white38),
+                        ),
+                        child: const Icon(Icons.zoom_in_rounded, size: 22, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ];
 
           return Stack(
             clipBehavior: Clip.none,
             children: [
-              ...normalChildren,
-              if (selectedChild != null) selectedChild,
+              ...visualCards,
+              if (selectedVisual != null) selectedVisual,
+              ...hitZones,
+              ...selectedZoom,
             ],
           );
         },
@@ -3675,6 +4893,7 @@ class GameCardWidget extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback onZoom;
+  final double width;
 
   const GameCardWidget({
     super.key,
@@ -3682,6 +4901,7 @@ class GameCardWidget extends StatelessWidget {
     required this.selected,
     required this.onTap,
     required this.onZoom,
+    this.width = 104,
   });
 
   Color cardColor() {
@@ -3741,14 +4961,16 @@ class GameCardWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => onTap(),
+      onLongPress: onZoom,
       child: AnimatedScale(
         scale: selected ? 1.045 : 1.0,
         duration: const Duration(milliseconds: 180),
         curve: Curves.easeOutBack,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          width: 104,
+          width: width,
         transform: selected
             ? Matrix4.translationValues(0, -8, 0)
             : Matrix4.identity(),

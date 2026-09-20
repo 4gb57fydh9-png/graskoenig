@@ -1,12 +1,15 @@
 import 'dart:math';
+import 'dart:convert';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await TestWallet.instance.load();
   await lockPortraitOrientation();
   runApp(const GraskoenigApp());
 }
@@ -18,9 +21,7 @@ Future<void> lockPortraitOrientation() {
   // gegeneinander verschieben. Native Android/iOS Builds werden weiterhin
   // korrekt gesperrt.
   if (kIsWeb) return Future<void>.value();
-  return SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
+  return SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 }
 
 Future<void> lockLandscapeOrientation() {
@@ -31,7 +32,9 @@ Future<void> lockLandscapeOrientation() {
   ]);
 }
 
-// Graskoenig V0.10.7 - Native TestFlight Landscape Fix
+// Graskoenig V0.12.0 - Kartenfarben, Symbole und ausgewogene Avatare.
+// Setup: flutter pub add shared_preferences
+// Keine echten Zahlungen, kein Online-Spiel, keine auszahlbare Waehrung.
 const int handLimit = 5;
 const int maxTurnsPerPlayerPerRound = 6;
 
@@ -42,6 +45,399 @@ const Color kNeon = Color(0xFF42F35C);
 const Color kMint = Color(0xFF9CF0A7);
 const Color kGold = Color(0xFFFFC62E);
 const Color kCream = Color(0xFFF3E7CA);
+
+// Test economy only. Production must verify purchases and results on a server.
+class CoinMatch {
+  final int fee;
+  final int players;
+  bool started = false;
+  bool closed = false;
+  int payout = 0;
+  CoinMatch(this.fee, this.players);
+}
+
+class TestWallet extends ChangeNotifier {
+  static final instance = TestWallet();
+  static const entryFees = [50, 100, 250];
+  static const initialCoins = 1000;
+  static const dailyCoins = 250;
+  static const packages = [500, 1500, 5000];
+  static const _key = 'graskoenig_test_wallet_v1';
+  SharedPreferences? _prefs;
+  int coins = initialCoins;
+  int lastBonus = 0;
+  List<String> history = [];
+  bool busy = false;
+  String? error;
+  bool get ready => _prefs != null && error == null;
+  bool get canClaim =>
+      DateTime.now().millisecondsSinceEpoch - lastBonus >=
+      const Duration(hours: 24).inMilliseconds;
+
+  Future<void> load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_key);
+      if (raw != null) {
+        final value = jsonDecode(raw) as Map<String, dynamic>;
+        final balance = value['coins'] as int;
+        final bonus = value['lastBonus'] as int;
+        final entries = List<String>.from(value['history'] as List);
+        if (balance < 0 || bonus < 0)
+          throw const FormatException('Ungültiger Münzstand');
+        coins = balance;
+        lastBonus = bonus;
+        history = entries;
+      } else {
+        final ok = await prefs.setString(
+          _key,
+          jsonEncode({
+            'coins': initialCoins,
+            'lastBonus': 0,
+            'history': ['Startguthaben: +$initialCoins'],
+          }),
+        );
+        if (!ok)
+          throw StateError('Startguthaben konnte nicht gespeichert werden.');
+        history = ['Startguthaben: +$initialCoins'];
+      }
+      _prefs = prefs;
+      error = null;
+    } catch (_) {
+      error = 'Guthaben konnte nicht geladen werden. Bitte App neu starten. Es wurden keine Münzen zurückgesetzt.';
+    }
+  }
+
+  Future<void> _change(int delta, String label, {int? bonusTime}) async {
+    if (!ready) throw StateError(error ?? 'Guthaben nicht verfügbar.');
+    if (busy) throw StateError('Bitte einen Moment warten.');
+    if (coins + delta < 0)
+      throw StateError(
+        'Zu wenig Münzen. Hole den Gratisbonus oder Testmünzen im Shop.',
+      );
+    busy = true;
+    notifyListeners();
+    try {
+      final entries = [
+        '$label: ${delta >= 0 ? '+' : ''}$delta',
+        ...history,
+      ].take(30).toList();
+      final nextBonus = bonusTime ?? lastBonus;
+      final ok = await _prefs!.setString(
+        _key,
+        jsonEncode({
+          'coins': coins + delta,
+          'lastBonus': nextBonus,
+          'history': entries,
+        }),
+      );
+      if (!ok)
+        throw StateError(
+          'Münzen konnten nicht gespeichert werden. Bitte erneut versuchen.',
+        );
+      coins += delta;
+      lastBonus = nextBonus;
+      history = entries;
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<CoinMatch> enter(int fee, int players) async {
+    if (!entryFees.contains(fee) || players < 2 || players > 3)
+      throw StateError('Ungültiger Tisch.');
+    await _change(-fee, 'Tischeinsatz');
+    return CoinMatch(fee, players);
+  }
+
+  Future<void> refund(CoinMatch match) async {
+    if (match.started || match.closed) return;
+    await _change(match.fee, 'Start abgebrochen');
+    match.closed = true;
+  }
+
+  Future<int?> settle(
+    CoinMatch? match,
+    List<int> scores,
+    List<int> wins,
+  ) async {
+    if (match == null) return null;
+    if (match.closed) return match.payout;
+    final best = scores.reduce(max);
+    final candidates = [
+      for (int i = 0; i < scores.length; i++)
+        if (scores[i] == best) i,
+    ];
+    final bestWins = candidates.map((i) => wins[i]).reduce(max);
+    final winners = candidates.where((i) => wins[i] == bestWins).toList();
+    final payout = winners.contains(0)
+        ? match.fee * match.players ~/ winners.length
+        : 0;
+    await _change(
+      payout,
+      payout > 0 ? 'Partie gewonnen (Spieler 1)' : 'Partie beendet',
+    );
+    match.payout = payout;
+    match.closed = true;
+    return payout;
+  }
+
+  Future<void> claim() async {
+    if (!canClaim) throw StateError('Der Bonus ist alle 24 Stunden verfügbar.');
+    await _change(
+      dailyCoins,
+      'Gratisbonus',
+      bonusTime: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  Future<void> buyTestCoins(int amount) async {
+    if (!packages.contains(amount)) throw StateError('Unbekanntes Münzpaket.');
+    await _change(amount, 'Simulierter Kauf – kostenlos');
+  }
+}
+
+class WalletBar extends StatelessWidget {
+  const WalletBar({super.key});
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: TestWallet.instance,
+    builder: (context, _) => Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            const Icon(Icons.monetization_on_rounded, color: kGold),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                TestWallet.instance.error ??
+                    '${TestWallet.instance.coins} MÜNZEN • SPIELER 1',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class CoinLobbyScreen extends StatelessWidget {
+  const CoinLobbyScreen({super.key});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('GRASKÖNIG • SPIELTISCHE')),
+    body: LeafBackground(
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: AnimatedBuilder(
+            animation: TestWallet.instance,
+            builder: (context, _) => ListView(
+              padding: const EdgeInsets.all(20),
+              children: [
+                const WalletBar(),
+                const SizedBox(height: 16),
+                const Text(
+                  'DEIN TISCH. DEIN GROW.',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w900,
+                    color: kMint,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Lokaler Test mit 2–3 Spielern und optionalem Bot. Vier Runden pro Partie. '
+                  'Spieler 1 zahlt den Einsatz; die Gegnereinsätze werden simuliert. '
+                  'Der Gesamtsieger erhält den Pot, bei Gleichstand wird geteilt (abgerundet). '
+                  'Nur Testmünzen, keine Auszahlung in Geld.',
+                ),
+                const SizedBox(height: 16),
+                for (int i = 0; i < TestWallet.entryFees.length; i++)
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            const [
+                              'KLEINER GARTEN',
+                              'GEWÄCHSHAUS',
+                              'KÖNIGSPLANTAGE',
+                            ][i],
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w900,
+                              fontSize: 20,
+                              color: kGold,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            '${TestWallet.entryFees[i]} Münzen Einsatz • Pot: ${TestWallet.entryFees[i] * 2}–${TestWallet.entryFees[i] * 3}',
+                          ),
+                          const SizedBox(height: 12),
+                          FilledButton(
+                            onPressed:
+                                TestWallet.instance.ready &&
+                                    !TestWallet.instance.busy &&
+                                    TestWallet.instance.coins >=
+                                        TestWallet.entryFees[i]
+                                ? () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => PlayerSetupScreen(
+                                        entryFee: TestWallet.entryFees[i],
+                                      ),
+                                    ),
+                                  )
+                                : null,
+                            child: Text(
+                              TestWallet.instance.coins <
+                                      TestWallet.entryFees[i]
+                                  ? 'ZU WENIG MÜNZEN'
+                                  : 'SPIELER & AVATARE WÄHLEN',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const CoinShopScreen()),
+                  ),
+                  icon: const Icon(Icons.storefront),
+                  label: const Text('SHOP & GRATISBONUS'),
+                ),
+                const ListTile(
+                  leading: Icon(Icons.lock_outline),
+                  title: Text('Online, Freunde & Rangliste'),
+                  subtitle: Text('Nach den lokalen Tests verfügbar'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class CoinShopScreen extends StatefulWidget {
+  const CoinShopScreen({super.key});
+  @override
+  State<CoinShopScreen> createState() => _CoinShopScreenState();
+}
+
+class _CoinShopScreenState extends State<CoinShopScreen> {
+  bool _working = false;
+  Future<void> _run(Future<void> Function() action) async {
+    if (_working) return;
+    setState(() => _working = true);
+    try {
+      await action();
+    } catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$error')));
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  Future<void> _purchase(int amount) async {
+    await _run(() async {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('KOSTENLOSER TESTKAUF'),
+          content: Text(
+            '$amount Testmünzen hinzufügen? Es erfolgt keine Zahlung und kein App-Store-Kauf.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('ABBRECHEN'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('TESTKAUF BESTÄTIGEN'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed == true) await TestWallet.instance.buyTestCoins(amount);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('MÜNZSHOP • TESTVERSION')),
+    body: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: AnimatedBuilder(
+          animation: TestWallet.instance,
+          builder: (context, _) {
+            final wallet = TestWallet.instance;
+            final enabled = wallet.ready && !wallet.busy && !_working;
+            return ListView(
+              padding: const EdgeInsets.all(20),
+              children: [
+                const WalletBar(),
+                const SizedBox(height: 12),
+                const Text(
+                  'Alle Pakete sind im Test kostenlos. Echte In-App-Käufe werden später freigeschaltet. '
+                  'Testmünzen haben keinen Geldwert und werden nicht in einen späteren Echtgeldkauf umgewandelt.',
+                ),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: enabled && wallet.canClaim
+                      ? () => _run(wallet.claim)
+                      : null,
+                  icon: const Icon(Icons.redeem),
+                  label: Text(
+                    wallet.canClaim
+                        ? '+${TestWallet.dailyCoins} GRATIS ABHOLEN'
+                        : 'BONUS ABGEHOLT • ALLE 24 STUNDEN',
+                  ),
+                ),
+                for (final amount in TestWallet.packages)
+                  Card(
+                    child: ListTile(
+                      leading: const Icon(Icons.monetization_on, color: kGold),
+                      title: Text('$amount Münzen'),
+                      subtitle: const Text('Kostenlose Kaufsimulation'),
+                      trailing: TextButton(
+                        onPressed: enabled ? () => _purchase(amount) : null,
+                        child: const Text('TESTEN'),
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 20),
+                const Text(
+                  'LETZTE BUCHUNGEN',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                for (final entry in wallet.history)
+                  ListTile(dense: true, title: Text(entry)),
+                const Text(
+                  'Guthaben wird nur auf diesem Gerät gespeichert. Neuinstallation oder Löschen der App-Daten setzt den Teststand zurück. '
+                  'Beim Schließen einer laufenden Partie verfällt der Einsatz.',
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    ),
+  );
+}
 
 enum GameHaptic { selection, light, medium, heavy }
 
@@ -92,10 +488,8 @@ class GameFeedback {
 
   static Future<void> selection() => _haptic(GameHaptic.selection);
 
-  static Future<void> preview() => trigger(
-        'sound_action.wav',
-        haptic: GameHaptic.medium,
-      );
+  static Future<void> preview() =>
+      trigger('sound_action.wav', haptic: GameHaptic.medium);
 
   static Future<void> startMenuMusic() async {
     if (!musicEnabled || menuMusicPlaying) return;
@@ -103,9 +497,7 @@ class GameFeedback {
     try {
       await _musicPlayer.setReleaseMode(ReleaseMode.loop);
       await _musicPlayer.setVolume(0.18);
-      await _musicPlayer.play(
-        AssetSource('cards/sound_reggae_menu.wav'),
-      );
+      await _musicPlayer.play(AssetSource('cards/sound_reggae_menu.wav'));
       menuMusicPlaying = true;
     } catch (_) {
       // Browser können automatisches Audio vor dem ersten Nutzertipp blockieren.
@@ -150,13 +542,138 @@ class AvatarOption {
 }
 
 const List<AvatarOption> kAvatarOptions = <AvatarOption>[
-  AvatarOption('Graskönig', 'assets/cards/graskoenig.jpg'),
-  AvatarOption('Dealer', 'assets/cards/dealer.jpg'),
+  AvatarOption('Graskönig', 'assets/cards/graskoenig_icon.png'),
+  AvatarOption('Powerfrau', 'assets/cards/en100_v12.png'),
   AvatarOption('Kumpel', 'assets/cards/basis2.jpg'),
-  AvatarOption('Growshop', 'assets/cards/growshop.jpg'),
-  AvatarOption('Anwalt', 'assets/cards/anwalt.jpg'),
-  AvatarOption('Beste Freunde', 'assets/cards/freunde.jpg'),
+  AvatarOption('Glücksfee', 'assets/cards/glueck_v12.png'),
+  AvatarOption('Dealer', 'assets/cards/dealer.jpg'),
+  AvatarOption('Anwältin', 'assets/cards/anwalt_v12.png'),
 ];
+
+// Display only the artwork region of a card, never its border or footer.
+class CharacterPortrait extends StatelessWidget {
+  final String asset;
+  const CharacterPortrait({super.key, required this.asset});
+  @override
+  Widget build(BuildContext context) => ClipRect(
+    child: LayoutBuilder(
+      builder: (context, box) {
+        final size = min(box.maxWidth, box.maxHeight);
+        if (asset == 'assets/cards/graskoenig_icon.png') {
+          return Image.asset(
+            asset,
+            width: size,
+            height: size,
+            fit: BoxFit.contain,
+          );
+        }
+        return Center(
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: ClipRect(
+              child: OverflowBox(
+                maxWidth: size / .8,
+                maxHeight: size * 1.5 / .8,
+                alignment: const Alignment(0, -.25),
+                child: Image.asset(
+                  asset,
+                  width: size / .8,
+                  height: size * 1.5 / .8,
+                  fit: BoxFit.fill,
+                  errorBuilder: (_, __, ___) =>
+                      const Center(child: Icon(Icons.person, size: 48)),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    ),
+  );
+}
+
+String categoryName(CardType? type) {
+  if (type == null) return 'ALLE';
+  switch (type) {
+    case CardType.grass:
+      return 'GRAS';
+    case CardType.energy:
+      return 'ENERGIE';
+    case CardType.base:
+      return 'BASIS';
+    case CardType.attack:
+      return 'ANGRIFF';
+    case CardType.defense:
+      return 'ABWEHR';
+    case CardType.action:
+      return 'AKTION';
+  }
+}
+
+Color cardCategoryColor(CardType type) {
+  switch (type) {
+    case CardType.grass:
+      return const Color(0xFF13713B);
+    case CardType.energy:
+      return const Color(0xFFC89600);
+    case CardType.base:
+      return const Color(0xFF712792);
+    case CardType.attack:
+      return const Color(0xFFA62620);
+    case CardType.defense:
+      return const Color(0xFF1374AA);
+    case CardType.action:
+      return const Color(0xFFDD278C);
+  }
+}
+
+// Symbols are rendered consistently by Flutter on every face-up card,
+// including assets not included in this update. The card back stays neutral.
+class CardFace extends StatelessWidget {
+  final GameCard card;
+  const CardFace({super.key, required this.card});
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) {
+      final badge = (box.maxWidth * .18).clamp(13.0, 36.0).toDouble();
+      return Column(
+        children: [
+          Expanded(
+            child: SizedBox(
+              width: double.infinity,
+              child: card.assetPath == null
+                  ? CardFallbackLarge(card: card)
+                  : Image.asset(
+                      card.assetPath!,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, __, ___) =>
+                          CardFallbackLarge(card: card),
+                    ),
+            ),
+          ),
+          Container(
+            height: badge + 2,
+            color: cardCategoryColor(card.type),
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 2),
+              child: Text(
+                cardIcon(card.type),
+                semanticsLabel: categoryName(card.type),
+                style: TextStyle(
+                  fontSize: badge * .8,
+                  height: 1,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    },
+  );
+}
 
 String playerAvatarAsset(int index) {
   return kAvatarOptions[index % kAvatarOptions.length].assetPath;
@@ -185,11 +702,32 @@ class GameCard {
 GameCard grassCard(int power) {
   switch (power) {
     case 20:
-      return const GameCard(type: CardType.grass, title: 'Kleiner Beutel', value: '20 g', effect: 'Klein, aber fein.', power: 20, assetPath: 'assets/cards/gras20.jpg');
+      return const GameCard(
+        type: CardType.grass,
+        title: 'Kleiner Beutel',
+        value: '20 g',
+        effect: 'Klein, aber fein.',
+        power: 20,
+        assetPath: 'assets/cards/gras20.jpg',
+      );
     case 50:
-      return const GameCard(type: CardType.grass, title: 'Solide Ernte', value: '50 g', effect: 'Es wird was.', power: 50, assetPath: 'assets/cards/gras50.jpg');
+      return const GameCard(
+        type: CardType.grass,
+        title: 'Solide Ernte',
+        value: '50 g',
+        effect: 'Es wird was.',
+        power: 50,
+        assetPath: 'assets/cards/gras50.jpg',
+      );
     case 100:
-      return const GameCard(type: CardType.grass, title: 'Fette Ernte', value: '100 g', effect: 'Jetzt wird’s ernst.', power: 100, assetPath: 'assets/cards/gras100.jpg');
+      return const GameCard(
+        type: CardType.grass,
+        title: 'Fette Ernte',
+        value: '100 g',
+        effect: 'Jetzt wird’s ernst.',
+        power: 100,
+        assetPath: 'assets/cards/gras100.jpg',
+      );
     default:
       return const GameCard(
         type: CardType.grass,
@@ -205,13 +743,41 @@ GameCard grassCard(int power) {
 GameCard energyCard(int power) {
   switch (power) {
     case 25:
-      return const GameCard(type: CardType.energy, title: 'Notstrom', value: '25 %', effect: 'Ein bisschen reicht.', power: 25, assetPath: 'assets/cards/en25.jpg');
+      return const GameCard(
+        type: CardType.energy,
+        title: 'Notstrom',
+        value: '25 %',
+        effect: 'Ein bisschen reicht.',
+        power: 25,
+        assetPath: 'assets/cards/en25.jpg',
+      );
     case 50:
-      return const GameCard(type: CardType.energy, title: 'Kellerstrom', value: '50 %', effect: 'Läuft.', power: 50, assetPath: 'assets/cards/en50.jpg');
+      return const GameCard(
+        type: CardType.energy,
+        title: 'Kellerstrom',
+        value: '50 %',
+        effect: 'Läuft.',
+        power: 50,
+        assetPath: 'assets/cards/en50_v12.png',
+      );
     case 75:
-      return const GameCard(type: CardType.energy, title: 'Grow Power', value: '75 %', effect: 'Schon ordentlich.', power: 75, assetPath: 'assets/cards/en75.jpg');
+      return const GameCard(
+        type: CardType.energy,
+        title: 'Grow Power',
+        value: '75 %',
+        effect: 'Schon ordentlich.',
+        power: 75,
+        assetPath: 'assets/cards/en75.jpg',
+      );
     default:
-      return const GameCard(type: CardType.energy, title: 'Volle Power', value: '100 %', effect: 'Volle Power.', power: 100, assetPath: 'assets/cards/en100.jpg');
+      return const GameCard(
+        type: CardType.energy,
+        title: 'Volle Power',
+        value: '100 %',
+        effect: 'Volle Power.',
+        power: 100,
+        assetPath: 'assets/cards/en100_v12.png',
+      );
   }
 }
 
@@ -241,9 +807,33 @@ List<GameCard> buildDeck() {
     }
   }
 
-  addCards(4, CardType.grass, 'Kleiner Beutel', '20 g', 'Klein, aber fein.', power: 20, assetPath: 'assets/cards/gras20.jpg');
-  addCards(5, CardType.grass, 'Solide Ernte', '50 g', 'Es wird was.', power: 50, assetPath: 'assets/cards/gras50.jpg');
-  addCards(4, CardType.grass, 'Fette Ernte', '100 g', 'Jetzt wird’s ernst.', power: 100, assetPath: 'assets/cards/gras100.jpg');
+  addCards(
+    4,
+    CardType.grass,
+    'Kleiner Beutel',
+    '20 g',
+    'Klein, aber fein.',
+    power: 20,
+    assetPath: 'assets/cards/gras20.jpg',
+  );
+  addCards(
+    5,
+    CardType.grass,
+    'Solide Ernte',
+    '50 g',
+    'Es wird was.',
+    power: 50,
+    assetPath: 'assets/cards/gras50.jpg',
+  );
+  addCards(
+    4,
+    CardType.grass,
+    'Fette Ernte',
+    '100 g',
+    'Jetzt wird’s ernst.',
+    power: 100,
+    assetPath: 'assets/cards/gras100.jpg',
+  );
   addCards(
     3,
     CardType.grass,
@@ -254,34 +844,210 @@ List<GameCard> buildDeck() {
     assetPath: 'assets/cards/gras200.jpg',
   );
 
-  addCards(3, CardType.energy, 'Notstrom', '25 %', 'Ein bisschen reicht.', power: 25, assetPath: 'assets/cards/en25.jpg');
-  addCards(4, CardType.energy, 'Kellerstrom', '50 %', 'Läuft.', power: 50, assetPath: 'assets/cards/en50.jpg');
-  addCards(4, CardType.energy, 'Grow Power', '75 %', 'Schon ordentlich.', power: 75, assetPath: 'assets/cards/en75.jpg');
-  addCards(3, CardType.energy, 'Volle Power', '100 %', 'Volle Power.', power: 100, assetPath: 'assets/cards/en100.jpg');
+  addCards(
+    3,
+    CardType.energy,
+    'Notstrom',
+    '25 %',
+    'Ein bisschen reicht.',
+    power: 25,
+    assetPath: 'assets/cards/en25.jpg',
+  );
+  addCards(
+    4,
+    CardType.energy,
+    'Kellerstrom',
+    '50 %',
+    'Läuft.',
+    power: 50,
+    assetPath: 'assets/cards/en50_v12.png',
+  );
+  addCards(
+    4,
+    CardType.energy,
+    'Grow Power',
+    '75 %',
+    'Schon ordentlich.',
+    power: 75,
+    assetPath: 'assets/cards/en75.jpg',
+  );
+  addCards(
+    3,
+    CardType.energy,
+    'Volle Power',
+    '100 %',
+    'Volle Power.',
+    power: 100,
+    assetPath: 'assets/cards/en100_v12.png',
+  );
 
-  addCards(4, CardType.base, 'Kumpel um die Ecke', '×2', 'Regional. Loyal.', power: 2, assetPath: 'assets/cards/basis2.jpg');
-  addCards(3, CardType.base, 'Dealer', '×3', 'Schnelle Verbindungen.', power: 3, assetPath: 'assets/cards/dealer.jpg');
-  addCards(3, CardType.base, 'Growshop', '×3', 'Alles was du brauchst.', power: 3, assetPath: 'assets/cards/growshop.jpg');
-  addCards(2, CardType.base, 'Graskönig', '×4', 'Das Nonplusultra.', power: 4, assetPath: 'assets/cards/graskoenig.jpg');
+  addCards(
+    4,
+    CardType.base,
+    'Kumpel um die Ecke',
+    '×2',
+    'Regional. Loyal.',
+    power: 2,
+    assetPath: 'assets/cards/basis2.jpg',
+  );
+  addCards(
+    3,
+    CardType.base,
+    'Dealer',
+    '×3',
+    'Schnelle Verbindungen.',
+    power: 3,
+    assetPath: 'assets/cards/dealer.jpg',
+  );
+  addCards(
+    3,
+    CardType.base,
+    'Growshop',
+    '×3',
+    'Alles was du brauchst.',
+    power: 3,
+    assetPath: 'assets/cards/growshop.jpg',
+  );
+  addCards(
+    2,
+    CardType.base,
+    'Graskönig',
+    '×4',
+    'Das Nonplusultra.',
+    power: 4,
+    assetPath: 'assets/cards/graskoenig.jpg',
+  );
 
-  addCards(2, CardType.attack, 'Stromausfall', '💥', 'Energie eines Gegners −1 Stufe.', assetPath: 'assets/cards/strom.jpg');
-  addCards(2, CardType.attack, 'Energiediebstahl', '💥', 'Tausche deine Energie mit der eines Gegners.', assetPath: 'assets/cards/energiedieb.jpg');
-  addCards(2, CardType.attack, 'Schädlingsbefall', '💥', 'Gras eines Gegners −1 Stufe.', assetPath: 'assets/cards/schaedling.jpg');
-  addCards(2, CardType.attack, 'Razzia', '💥', 'Ein Gegner legt 1 zufällige Handkarte ab.', assetPath: 'assets/cards/razzia.jpg');
-  addCards(2, CardType.attack, 'Zu platt', '💥', 'Ein Gegner überspringt seinen nächsten Zug.', assetPath: 'assets/cards/platt.jpg');
+  addCards(
+    2,
+    CardType.attack,
+    'Stromausfall',
+    '💥',
+    'Energie eines Gegners −1 Stufe.',
+    assetPath: 'assets/cards/strom.jpg',
+  );
+  addCards(
+    2,
+    CardType.attack,
+    'Energiediebstahl',
+    '💥',
+    'Tausche deine Energie mit der eines Gegners.',
+    assetPath: 'assets/cards/energiedieb.jpg',
+  );
+  addCards(
+    2,
+    CardType.attack,
+    'Schädlingsbefall',
+    '💥',
+    'Gras eines Gegners −1 Stufe.',
+    assetPath: 'assets/cards/schaedling.jpg',
+  );
+  addCards(
+    2,
+    CardType.attack,
+    'Razzia',
+    '💥',
+    'Ein Gegner legt 1 zufällige Handkarte ab.',
+    assetPath: 'assets/cards/razzia.jpg',
+  );
+  addCards(
+    2,
+    CardType.attack,
+    'Zu platt',
+    '💥',
+    'Ein Gegner überspringt seinen nächsten Zug.',
+    assetPath: 'assets/cards/platt.jpg',
+  );
 
-  addCards(2, CardType.defense, 'Sicherungskasten', '🛡️', 'Stoppt Stromausfall.', assetPath: 'assets/cards/sicherung.jpg');
-  addCards(1, CardType.defense, 'Wachhund', '🛡️', 'Stoppt Energiediebstahl.', assetPath: 'assets/cards/wachhund.jpg');
-  addCards(1, CardType.defense, 'Schädlingsmittel', '🛡️', 'Stoppt Schädlingsbefall.', assetPath: 'assets/cards/mittel.jpg');
-  addCards(2, CardType.defense, 'Anwalt', '🛡️', 'Stoppt Razzia oder Zu platt.', assetPath: 'assets/cards/anwalt.jpg');
-  addCards(2, CardType.defense, 'Alles easy', '🛡️', 'Stoppt jeden Angriff.', assetPath: 'assets/cards/easy.jpg');
+  addCards(
+    2,
+    CardType.defense,
+    'Sicherungskasten',
+    '🛡️',
+    'Stoppt Stromausfall.',
+    assetPath: 'assets/cards/sicherung.jpg',
+  );
+  addCards(
+    1,
+    CardType.defense,
+    'Wachhund',
+    '🛡️',
+    'Stoppt Energiediebstahl.',
+    assetPath: 'assets/cards/wachhund.jpg',
+  );
+  addCards(
+    1,
+    CardType.defense,
+    'Schädlingsmittel',
+    '🛡️',
+    'Stoppt Schädlingsbefall.',
+    assetPath: 'assets/cards/mittel.jpg',
+  );
+  addCards(
+    2,
+    CardType.defense,
+    'Anwalt',
+    '🛡️',
+    'Stoppt Razzia oder Zu platt.',
+    assetPath: 'assets/cards/anwalt_v12.png',
+  );
+  addCards(
+    2,
+    CardType.defense,
+    'Alles easy',
+    '🛡️',
+    'Stoppt jeden Angriff.',
+    assetPath: 'assets/cards/easy.jpg',
+  );
 
-  addCards(3, CardType.action, 'Dünger', '★', 'Gras +1 Stufe.', assetPath: 'assets/cards/duenger.jpg');
-  addCards(3, CardType.action, 'Gartenschere', '★', 'Ziehe 2 Karten, behalte 1.', assetPath: 'assets/cards/schere.jpg');
-  addCards(2, CardType.action, 'Übertopf', '★', 'Gras bis zu deinem nächsten Zug geschützt.', assetPath: 'assets/cards/uebertopf.jpg');
-  addCards(2, CardType.action, 'Beste Freunde', '★', 'Tausche blind 1 Handkarte.', assetPath: 'assets/cards/freunde.jpg');
-  addCards(2, CardType.action, 'Glückstreffer', '★', 'Ziehe 3 Karten, behalte 1.', assetPath: 'assets/cards/glueck.jpg');
-  addCards(2, CardType.action, 'Ich zieh mir zwei', '★', 'Ziehe 2 Karten.', assetPath: 'assets/cards/zwei.jpg');
+  addCards(
+    3,
+    CardType.action,
+    'Dünger',
+    '★',
+    'Gras +1 Stufe.',
+    assetPath: 'assets/cards/duenger_v12.png',
+  );
+  addCards(
+    3,
+    CardType.action,
+    'Gartenschere',
+    '★',
+    'Ziehe 2 Karten, behalte 1.',
+    assetPath: 'assets/cards/schere_v12.png',
+  );
+  addCards(
+    2,
+    CardType.action,
+    'Übertopf',
+    '★',
+    'Gras bis zu deinem nächsten Zug geschützt.',
+    assetPath: 'assets/cards/uebertopf_v12.png',
+  );
+  addCards(
+    2,
+    CardType.action,
+    'Beste Freunde',
+    '★',
+    'Tausche blind 1 Handkarte.',
+    assetPath: 'assets/cards/freunde_v12.png',
+  );
+  addCards(
+    2,
+    CardType.action,
+    'Glückstreffer',
+    '★',
+    'Ziehe 3 Karten, behalte 1.',
+    assetPath: 'assets/cards/glueck_v12.png',
+  );
+  addCards(
+    2,
+    CardType.action,
+    'Ich zieh mir zwei',
+    '★',
+    'Ziehe 2 Karten.',
+    assetPath: 'assets/cards/zwei_v12.png',
+  );
 
   return deck;
 }
@@ -413,10 +1179,7 @@ class _StartScreenState extends State<StartScreen> {
     await GameFeedback.stopMenuMusic();
     if (!mounted) return;
 
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => page),
-    );
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => page));
 
     if (!mounted) return;
     await GameFeedback.startMenuMusic();
@@ -448,7 +1211,8 @@ class _StartScreenState extends State<StartScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (!kIsWeb && MediaQuery.of(context).orientation == Orientation.landscape) {
+    if (!kIsWeb &&
+        MediaQuery.of(context).orientation == Orientation.landscape) {
       return const OrientationHintScreen(
         portrait: true,
         title: 'BITTE IPHONE HOCHKANT HALTEN',
@@ -471,14 +1235,10 @@ class _StartScreenState extends State<StartScreen> {
 
                       Center(
                         child: Container(
-                          width: 118,
-                          height: 172,
+                          width: 260,
+                          height: 260,
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(18),
-                            border: Border.all(
-                              color: kGold,
-                              width: 2.5,
-                            ),
                             boxShadow: const [
                               BoxShadow(
                                 color: Color(0x66000000),
@@ -494,17 +1254,8 @@ class _StartScreenState extends State<StartScreen> {
                           ),
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(15),
-                            child: Image.asset(
-                              'assets/cards/graskoenig.jpg',
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => Container(
-                                color: kPanel,
-                                alignment: Alignment.center,
-                                child: const Text(
-                                  '👑',
-                                  style: TextStyle(fontSize: 74),
-                                ),
-                              ),
+                            child: const CharacterPortrait(
+                              asset: 'assets/cards/graskoenig_icon.png',
                             ),
                           ),
                         ),
@@ -541,18 +1292,27 @@ class _StartScreenState extends State<StartScreen> {
                         ),
                       ),
                       const SizedBox(height: 28),
+                      const WalletBar(),
+                      const SizedBox(height: 12),
 
                       MenuButton(
                         icon: Icons.play_arrow_rounded,
-                        label: 'SPIEL STARTEN',
+                        label: 'TISCH AUSWÄHLEN',
                         primary: true,
-                        onTap: () => _openPage(const PlayerSetupScreen()),
+                        onTap: () => _openPage(const CoinLobbyScreen()),
                       ),
                       const SizedBox(height: 9),
                       MenuButton(
                         icon: Icons.groups_2_outlined,
-                        label: 'SPIEL BEITRETEN',
-                        onTap: () => _openPage(const OnlineJoinScreen()),
+                        label: 'ONLINE & FREUNDE • BALD',
+                        onTap: () =>
+                            _comingSoon(context, 'ONLINE NOCH NICHT VERFÜGBAR'),
+                      ),
+                      const SizedBox(height: 9),
+                      MenuButton(
+                        icon: Icons.storefront_outlined,
+                        label: 'MÜNZSHOP & TAGESBONUS',
+                        onTap: () => _openPage(const CoinShopScreen()),
                       ),
                       const SizedBox(height: 9),
                       MenuButton(
@@ -586,7 +1346,7 @@ class _StartScreenState extends State<StartScreen> {
                       ),
                       const SizedBox(height: 8),
                       const Text(
-                        'PROTOTYP • V0.10.7 • TESTFLIGHT NATIVE FIX • 2–3 SPIELER • BOT',
+                        'V0.12.0 • LOKALER MÜNZTEST • KEINE ECHTEN KÄUFE',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white38,
@@ -663,9 +1423,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('EINSTELLUNGEN'),
-      ),
+      appBar: AppBar(title: const Text('EINSTELLUNGEN')),
       body: LeafBackground(
         child: SafeArea(
           child: Center(
@@ -676,10 +1434,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: [
                   const Text(
                     'SPIELGEFÜHL',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w900,
-                    ),
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
                   ),
                   const SizedBox(height: 6),
                   const Text(
@@ -704,9 +1459,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             'HINTERGRUNDMUSIK',
                             style: TextStyle(fontWeight: FontWeight.w900),
                           ),
-                          subtitle: const Text(
-                            'Reggae-Musik im Hauptmenü',
-                          ),
+                          subtitle: const Text('Reggae-Musik im Hauptmenü'),
                           value: GameFeedback.musicEnabled,
                           onChanged: (value) async {
                             setState(() => GameFeedback.musicEnabled = value);
@@ -717,12 +1470,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         const Divider(height: 1, color: Colors.white12),
                         SwitchListTile(
-                          secondary: const Icon(Icons.volume_up_rounded, color: kNeon),
+                          secondary: const Icon(
+                            Icons.volume_up_rounded,
+                            color: kNeon,
+                          ),
                           title: const Text(
                             'TON',
                             style: TextStyle(fontWeight: FontWeight.w900),
                           ),
-                          subtitle: const Text('Kartenziehen, Angriff, Klopfen und Sieg'),
+                          subtitle: const Text(
+                            'Kartenziehen, Angriff, Klopfen und Sieg',
+                          ),
                           value: GameFeedback.soundEnabled,
                           onChanged: (value) {
                             setState(() => GameFeedback.soundEnabled = value);
@@ -731,12 +1489,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         const Divider(height: 1, color: Colors.white12),
                         SwitchListTile(
-                          secondary: const Icon(Icons.vibration_rounded, color: kGold),
+                          secondary: const Icon(
+                            Icons.vibration_rounded,
+                            color: kGold,
+                          ),
                           title: const Text(
                             'VIBRATION',
                             style: TextStyle(fontWeight: FontWeight.w900),
                           ),
-                          subtitle: const Text('Haptisches Feedback auf Android und iPhone'),
+                          subtitle: const Text(
+                            'Haptisches Feedback auf Android und iPhone',
+                          ),
                           value: GameFeedback.hapticsEnabled,
                           onChanged: (value) {
                             setState(() => GameFeedback.hapticsEnabled = value);
@@ -775,7 +1538,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 class PlayerSetupScreen extends StatefulWidget {
-  const PlayerSetupScreen({super.key});
+  final int entryFee;
+  const PlayerSetupScreen({super.key, this.entryFee = 50});
 
   @override
   State<PlayerSetupScreen> createState() => _PlayerSetupScreenState();
@@ -783,7 +1547,8 @@ class PlayerSetupScreen extends StatefulWidget {
 
 class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
   int playerCount = 2;
-  bool useBot = false;
+  bool useBot = true;
+  bool _launching = false;
 
   final controllers = [
     TextEditingController(text: 'Spieler 1'),
@@ -844,14 +1609,7 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                       children: [
                         Expanded(
                           child: ClipOval(
-                            child: Image.asset(
-                              avatar.assetPath,
-                              fit: BoxFit.cover,
-                              alignment: Alignment.topCenter,
-                              errorBuilder: (_, __, ___) => const Center(
-                                child: Icon(Icons.person, size: 42),
-                              ),
-                            ),
+                            child: CharacterPortrait(asset: avatar.assetPath),
                           ),
                         ),
                         const SizedBox(height: 4),
@@ -883,7 +1641,8 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (!kIsWeb && MediaQuery.of(context).orientation == Orientation.landscape) {
+    if (!kIsWeb &&
+        MediaQuery.of(context).orientation == Orientation.landscape) {
       return const OrientationHintScreen(
         portrait: true,
         title: 'BITTE IPHONE HOCHKANT HALTEN',
@@ -892,7 +1651,7 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('LOKALES SPIEL')),
+      appBar: AppBar(title: Text('TISCH • ${widget.entryFee} MÜNZEN')),
       body: LeafBackground(
         child: SafeArea(
           top: false,
@@ -903,7 +1662,8 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                 padding: const EdgeInsets.fromLTRB(16, 18, 16, 28),
                 children: [
                   SectionPanel(
-                    title: 'SPIELERANZAHL',
+                    title:
+                        'SPIELERANZAHL • GUTHABEN: ${TestWallet.instance.coins}',
                     child: Row(
                       children: [
                         for (final number in const [2, 3]) ...[
@@ -914,15 +1674,20 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                                 child: Center(
                                   child: Text(
                                     '$number SPIELER',
-                                    style: const TextStyle(fontWeight: FontWeight.w900),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w900,
+                                    ),
                                   ),
                                 ),
                               ),
                               selected: playerCount == number,
-                              onSelected: (_) => setState(() => playerCount = number),
+                              onSelected: (_) =>
+                                  setState(() => playerCount = number),
                               selectedColor: const Color(0xFF174D24),
                               side: BorderSide(
-                                color: playerCount == number ? kNeon : Colors.white24,
+                                color: playerCount == number
+                                    ? kNeon
+                                    : Colors.white24,
                               ),
                             ),
                           ),
@@ -939,7 +1704,9 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           secondary: Icon(
-                            useBot ? Icons.smart_toy_rounded : Icons.groups_2_rounded,
+                            useBot
+                                ? Icons.smart_toy_rounded
+                                : Icons.groups_2_rounded,
                             color: useBot ? kGold : kNeon,
                           ),
                           title: Text(
@@ -949,8 +1716,8 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                           subtitle: Text(
                             useBot
                                 ? playerCount == 2
-                                    ? 'Du spielst gegen einen Computergegner.'
-                                    : 'Die letzte Position übernimmt der Bot.'
+                                      ? 'Du spielst gegen einen Computergegner.'
+                                      : 'Die letzte Position übernimmt der Bot.'
                                 : 'Alle Spieler spielen lokal auf diesem Gerät.',
                           ),
                           value: useBot,
@@ -968,13 +1735,17 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                         final avatar = kAvatarOptions[avatarSelections[index]];
                         final color = playerAccent(index);
                         return Padding(
-                          padding: EdgeInsets.only(bottom: index == playerCount - 1 ? 0 : 10),
+                          padding: EdgeInsets.only(
+                            bottom: index == playerCount - 1 ? 0 : 10,
+                          ),
                           child: Container(
                             decoration: BoxDecoration(
                               color: Colors.black26,
                               borderRadius: BorderRadius.circular(14),
                               border: Border.all(
-                                color: isBot ? kGold.withOpacity(0.7) : Colors.white12,
+                                color: isBot
+                                    ? kGold.withOpacity(0.7)
+                                    : Colors.white12,
                               ),
                             ),
                             child: Row(
@@ -997,7 +1768,9 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                                 Expanded(
                                   child: isBot
                                       ? const Padding(
-                                          padding: EdgeInsets.symmetric(vertical: 15),
+                                          padding: EdgeInsets.symmetric(
+                                            vertical: 15,
+                                          ),
                                           child: Text(
                                             'Kiffer-Karl  •  BOT',
                                             style: TextStyle(
@@ -1008,12 +1781,18 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                                         )
                                       : TextField(
                                           controller: controllers[index],
-                                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 16,
+                                          ),
                                           decoration: const InputDecoration(
                                             border: InputBorder.none,
                                             isDense: true,
                                             hintText: 'Spielername',
-                                            contentPadding: EdgeInsets.symmetric(vertical: 14),
+                                            contentPadding:
+                                                EdgeInsets.symmetric(
+                                                  vertical: 14,
+                                                ),
                                           ),
                                         ),
                                 ),
@@ -1021,14 +1800,19 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Icon(
-                                      isBot ? Icons.smart_toy_rounded : Icons.edit_outlined,
+                                      isBot
+                                          ? Icons.smart_toy_rounded
+                                          : Icons.edit_outlined,
                                       color: isBot ? kGold : Colors.white54,
                                       size: 19,
                                     ),
                                     const SizedBox(height: 2),
                                     const Text(
                                       'AVATAR',
-                                      style: TextStyle(fontSize: 7, color: Colors.white38),
+                                      style: TextStyle(
+                                        fontSize: 7,
+                                        color: Colors.white38,
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -1051,82 +1835,123 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                     height: 58,
                     child: FilledButton.icon(
                       icon: const Icon(Icons.screen_rotation_rounded),
-                      onPressed: () async {
-                        // Wichtig fuer iPhone/Safari: vor dem Wechsel ins Spiel
-                        // jedes Textfeld sicher verlassen und dem VisualViewport
-                        // Zeit geben, nach der Tastatur wieder auf 1:1 zu kommen.
-                        FocusManager.instance.primaryFocus?.unfocus();
-                        await Future<void>.delayed(const Duration(milliseconds: 350));
-                        if (!mounted) return;
+                      onPressed: _launching
+                          ? null
+                          : () async {
+                              setState(() => _launching = true);
+                              CoinMatch? match;
+                              try {
+                                // Wichtig fuer iPhone/Safari: vor dem Wechsel ins Spiel
+                                // jedes Textfeld sicher verlassen und dem VisualViewport
+                                // Zeit geben, nach der Tastatur wieder auf 1:1 zu kommen.
+                                FocusManager.instance.primaryFocus?.unfocus();
+                                await Future<void>.delayed(
+                                  const Duration(milliseconds: 350),
+                                );
+                                if (!mounted) return;
 
-                        final players = List<String>.generate(
-                          playerCount,
-                          (index) {
-                            if (useBot && index == playerCount - 1) {
-                              return 'Kiffer-Karl';
-                            }
-                            return controllers[index].text.trim().isEmpty
-                                ? 'Spieler ${index + 1}'
-                                : controllers[index].text.trim();
-                          },
-                        );
-                        final avatars = List<String>.generate(
-                          playerCount,
-                          (index) => kAvatarOptions[avatarSelections[index]].assetPath,
-                        );
-                        final bots = List<bool>.generate(
-                          playerCount,
-                          (index) => useBot && index == playerCount - 1,
-                        );
+                                final players = List<String>.generate(
+                                  playerCount,
+                                  (index) {
+                                    if (useBot && index == playerCount - 1) {
+                                      return 'Kiffer-Karl';
+                                    }
+                                    return controllers[index].text
+                                            .trim()
+                                            .isEmpty
+                                        ? 'Spieler ${index + 1}'
+                                        : controllers[index].text.trim();
+                                  },
+                                );
+                                final avatars = List<String>.generate(
+                                  playerCount,
+                                  (index) =>
+                                      kAvatarOptions[avatarSelections[index]]
+                                          .assetPath,
+                                );
+                                final bots = List<bool>.generate(
+                                  playerCount,
+                                  (index) => useBot && index == playerCount - 1,
+                                );
+                                match = await TestWallet.instance.enter(
+                                  widget.entryFee,
+                                  playerCount,
+                                );
+                                if (!mounted) return;
 
-                        if (!kIsWeb) {
-                          // Native iOS/Android: zuerst wirklich ins Querformat
-                          // wechseln und danach direkt das Spiel oeffnen.
-                          // Die Safari-Zwischenansicht darf hier NICHT verwendet
-                          // werden, weil sie auf eine Rotation wartet, waehrend
-                          // der Setup-Screen noch auf Portrait gesperrt ist.
-                          await lockLandscapeOrientation();
-                          await Future<void>.delayed(
-                            const Duration(milliseconds: 300),
-                          );
-                          if (!mounted) return;
+                                if (!kIsWeb) {
+                                  // Native iOS/Android: zuerst wirklich ins Querformat
+                                  // wechseln und danach direkt das Spiel oeffnen.
+                                  // Die Safari-Zwischenansicht darf hier NICHT verwendet
+                                  // werden, weil sie auf eine Rotation wartet, waehrend
+                                  // der Setup-Screen noch auf Portrait gesperrt ist.
+                                  await lockLandscapeOrientation();
+                                  await Future<void>.delayed(
+                                    const Duration(milliseconds: 300),
+                                  );
+                                  if (!mounted) return;
 
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => GameScreen(
-                                players: players,
-                                avatarAssets: avatars,
-                                botPlayers: bots,
-                              ),
-                            ),
-                          );
-                          return;
-                        }
+                                  await Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => GameScreen(
+                                        coinMatch: match,
+                                        players: players,
+                                        avatarAssets: avatars,
+                                        botPlayers: bots,
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
 
-                        // Web/Safari: dort bleibt die spezielle Zwischenansicht
-                        // bestehen, weil sie die Safari-Touchkoordinaten nach
-                        // einer manuellen Drehung stabilisiert.
-                        final alreadyLandscape =
-                            MediaQuery.of(context).orientation == Orientation.landscape;
+                                // Web/Safari: dort bleibt die spezielle Zwischenansicht
+                                // bestehen, weil sie die Safari-Touchkoordinaten nach
+                                // einer manuellen Drehung stabilisiert.
+                                final alreadyLandscape =
+                                    MediaQuery.of(context).orientation ==
+                                    Orientation.landscape;
 
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => alreadyLandscape
-                                ? GameScreen(
-                                    players: players,
-                                    avatarAssets: avatars,
-                                    botPlayers: bots,
-                                  )
-                                : LandscapeLaunchScreen(
-                                    players: players,
-                                    avatarAssets: avatars,
-                                    botPlayers: bots,
+                                await Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => alreadyLandscape
+                                        ? GameScreen(
+                                            coinMatch: match,
+                                            players: players,
+                                            avatarAssets: avatars,
+                                            botPlayers: bots,
+                                          )
+                                        : LandscapeLaunchScreen(
+                                            coinMatch: match,
+                                            players: players,
+                                            avatarAssets: avatars,
+                                            botPlayers: bots,
+                                          ),
                                   ),
-                          ),
-                        );
-                      },
+                                );
+                              } catch (error) {
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('$error')),
+                                  );
+                                }
+                              } finally {
+                                if (match != null && !match.started) {
+                                  try {
+                                    await TestWallet.instance.refund(match);
+                                  } catch (error) {
+                                    if (mounted)
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                            SnackBar(content: Text('$error')),
+                                          );
+                                  }
+                                }
+                                await lockPortraitOrientation();
+                                if (mounted) setState(() => _launching = false);
+                              }
+                            },
                       label: const Text(
                         'SPIEL STARTEN',
                         style: TextStyle(fontSize: 18),
@@ -1136,8 +1961,8 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
                   const SizedBox(height: 8),
                   Text(
                     kIsWeb
-                        ? 'iPhone-Test: am besten schon VOR dem Start quer halten.'
-                        : 'Nach dem Start wechselt das Spiel ins Querformat.',
+                        ? 'Guthaben: Spieler 1. Ab Spielbeginn verfällt der Einsatz bei Abbruch. Bitte quer halten.'
+                        : 'Guthaben: Spieler 1. Ab Spielbeginn verfällt der Einsatz bei Abbruch. Das Spiel wechselt ins Querformat.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.white38, fontSize: 10),
                   ),
@@ -1151,14 +1976,15 @@ class _PlayerSetupScreenState extends State<PlayerSetupScreen> {
   }
 }
 
-
 class LandscapeLaunchScreen extends StatefulWidget {
+  final CoinMatch? coinMatch;
   final List<String> players;
   final List<String> avatarAssets;
   final List<bool> botPlayers;
 
   const LandscapeLaunchScreen({
     super.key,
+    this.coinMatch,
     required this.players,
     required this.avatarAssets,
     required this.botPlayers,
@@ -1183,7 +2009,8 @@ class _LandscapeLaunchScreenState extends State<LandscapeLaunchScreen> {
         // Safari braucht nach dem Drehen kurz Zeit, bis VisualViewport,
         // Flutter-Layout und Touch-Koordinaten wieder identisch sind.
         Future<void>.delayed(const Duration(milliseconds: 650), () {
-          if (mounted && MediaQuery.of(context).orientation == Orientation.landscape) {
+          if (mounted &&
+              MediaQuery.of(context).orientation == Orientation.landscape) {
             setState(() => _viewportReady = true);
           }
         });
@@ -1193,10 +2020,13 @@ class _LandscapeLaunchScreenState extends State<LandscapeLaunchScreen> {
 
   void _openGame() {
     if (!_viewportReady) return;
+    _viewportReady = false;
+    widget.coinMatch?.started = true;
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
         builder: (_) => GameScreen(
+          coinMatch: widget.coinMatch,
           players: widget.players,
           avatarAssets: widget.avatarAssets,
           botPlayers: widget.botPlayers,
@@ -1207,7 +2037,8 @@ class _LandscapeLaunchScreenState extends State<LandscapeLaunchScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final landscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final landscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
 
     return Scaffold(
       body: LeafBackground(
@@ -1221,25 +2052,35 @@ class _LandscapeLaunchScreenState extends State<LandscapeLaunchScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      landscape ? Icons.stay_current_landscape_rounded : Icons.screen_rotation_rounded,
+                      landscape
+                          ? Icons.stay_current_landscape_rounded
+                          : Icons.screen_rotation_rounded,
                       size: 62,
                       color: landscape ? kNeon : kGold,
                     ),
                     const SizedBox(height: 16),
                     Text(
-                      landscape ? 'QUERFORMAT ERKANNT' : 'BITTE IPHONE QUER HALTEN',
+                      landscape
+                          ? 'QUERFORMAT ERKANNT'
+                          : 'BITTE IPHONE QUER HALTEN',
                       textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Text(
                       landscape
                           ? (_viewportReady
-                              ? 'Die Touch-Flächen sind jetzt neu ausgerichtet. Du kannst das Spiel starten.'
-                              : 'Einen Moment – Safari richtet die Touch-Flächen neu aus …')
+                                ? 'Die Touch-Flächen sind jetzt neu ausgerichtet. Du kannst das Spiel starten.'
+                                : 'Einen Moment – Safari richtet die Touch-Flächen neu aus …')
                           : 'Erst nach dem Drehen wird das Spielfeld geladen. So bleiben Bild und Touch auf dem iPhone deckungsgleich.',
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.white60, height: 1.35),
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        height: 1.35,
+                      ),
                     ),
                     const SizedBox(height: 22),
                     if (landscape)
@@ -1253,11 +2094,18 @@ class _LandscapeLaunchScreenState extends State<LandscapeLaunchScreen> {
                               : const SizedBox(
                                   width: 20,
                                   height: 20,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 ),
                           label: Text(
-                            _viewportReady ? 'JETZT SPIELEN' : 'TOUCH WIRD AUSGERICHTET',
-                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
+                            _viewportReady
+                                ? 'JETZT SPIELEN'
+                                : 'TOUCH WIRD AUSGERICHTET',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w900,
+                            ),
                           ),
                         ),
                       ),
@@ -1296,7 +2144,8 @@ class _OnlineJoinScreenState extends State<OnlineJoinScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (!kIsWeb && MediaQuery.of(context).orientation == Orientation.landscape) {
+    if (!kIsWeb &&
+        MediaQuery.of(context).orientation == Orientation.landscape) {
       return const OrientationHintScreen(
         portrait: true,
         title: 'BITTE IPHONE HOCHKANT HALTEN',
@@ -1403,15 +2252,46 @@ class RulesScreen extends StatelessWidget {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(18),
-                    child: Image.asset(
-                      'assets/cards/rules.jpg',
-                      fit: BoxFit.fitWidth,
-                      errorBuilder: (_, __, ___) => const RulesFallback(),
+                  GestureDetector(
+                    onTap: () => showDialog<void>(
+                      context: context,
+                      builder: (dialogContext) => Dialog.fullscreen(
+                        backgroundColor: const Color(0xFF071B10),
+                        child: SafeArea(
+                          child: Column(
+                            children: [
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: IconButton(
+                                  tooltip: 'Schließen',
+                                  icon: const Icon(Icons.close),
+                                  onPressed: () => Navigator.pop(dialogContext),
+                                ),
+                              ),
+                              Expanded(
+                                child: InteractiveViewer(
+                                  minScale: 1,
+                                  maxScale: 5,
+                                  child: Center(
+                                    child: Image.asset(
+                                      'assets/cards/rules_v12.png',
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     ),
+                    child: Image.asset('assets/cards/rules_v12.png'),
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Anleitung antippen und zum Vergrößern zoomen. Motive in der Grafik sind Beispiele.',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
                   const RulesFallback(),
                 ],
               ),
@@ -1431,13 +2311,31 @@ class RulesFallback extends StatelessWidget {
     return const SectionPanel(
       title: 'KURZREGELN',
       child: Text(
-        '2–6 Spieler • 4 Runden • 5 Startkarten.\n\n'
+        '2–3 Spieler • 4 Runden • 5 Startkarten. Optional spielt der letzte Platz als Bot.\n\n'
         'Zug: 1 Karte ziehen, höchstens 1 Karte spielen oder ablegen. '
+        'Nach dem Ausspielen oder Ablegen wechselt das Spiel automatisch zum nächsten Spieler. '
+        'Erforderliche Karten- und Gegnerauswahlen werden vorher abgeschlossen. '
         'Die Plantage besteht aus Gras, Energie und Basis. '
         'Punkte = Gras × Energie × Basis.\n\n'
         'Ab dem 3. eigenen Zug darfst du mit vollständiger Plantage klopfen. '
         'Danach erhalten die anderen Spieler je einen letzten Zug. '
-        'Der erfolgreiche Klopfer erhält +100 Punkte, wenn seine Plantage allein die beste ist.',
+        'Der erfolgreiche Klopfer erhält +100 Punkte, wenn seine Plantage allein die beste ist. '
+        'Ohne Klopfen endet die Runde nach maximal 6 Zügen pro Spieler.\n\n'
+        'KARTEN ERKENNEN\n'
+        'Das Symbol links unten zeigt den Kartentyp:\n'
+        '🌿 Gras – grün\n⚡ Energie – gelb\n👑 Basis – violett\n'
+        '💥 Angriff – rot\n🛡️ Verteidigung – blau\n★ Aktion – rosa\n'
+        'Alle Aktionskarten sind rosa, auch die Gartenschere. Die Symbole werden in der App eingeblendet.\n\n'
+        'AVATARE\nWähle vor dem Spiel eine von 6 Figuren: 3 weibliche und 3 männliche. '
+        'Die Auswahl verändert keine Kartenwerte oder Gewinnchancen. Bot-Handkarten bleiben verdeckt.\n\n'
+        'MÜNZEN IM LOKALEN TEST\n'
+        'Spieler 1 startet mit 1.000 Münzen. Pro Partie kostet der Tisch 50, 100 oder 250 Münzen. '
+        'Gegnereinsätze werden simuliert. Der Gesamtsieger nach vier Runden gewinnt den Pot. '
+        'Bei Punktegleichstand zählen Rundensiege; bei weiterem Gleichstand wird der Pot geteilt und abgerundet. '
+        'Nur Gewinne von Spieler 1 werden diesem Gerät gutgeschrieben. '
+        'Bei Abbruch einer laufenden Partie verfällt der Einsatz.\n\n'
+        'Im Shop gibt es alle 24 Stunden 250 Gratis-Münzen und kostenlose Testkäufe. '
+        'Keine echten Zahlungen, keine Auszahlung in Geld und noch kein Online-Spiel.',
         style: TextStyle(height: 1.45, color: Colors.white70),
       ),
     );
@@ -1459,25 +2357,9 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
     for (final card in buildDeck()) {
       map['${card.type}-${card.title}-${card.value}'] = card;
     }
-    return map.values.where((card) => filter == null || card.type == filter).toList();
-  }
-
-  String categoryName(CardType? type) {
-    if (type == null) return 'ALLE';
-    switch (type) {
-      case CardType.grass:
-        return 'GRAS';
-      case CardType.energy:
-        return 'ENERGIE';
-      case CardType.base:
-        return 'BASIS';
-      case CardType.attack:
-        return 'ANGRIFF';
-      case CardType.defense:
-        return 'ABWEHR';
-      case CardType.action:
-        return 'AKTION';
-    }
+    return map.values
+        .where((card) => filter == null || card.type == filter)
+        .toList();
   }
 
   Future<void> showDetail(GameCard card) async {
@@ -1498,7 +2380,10 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
                     Expanded(
                       child: Text(
                         card.title.toUpperCase(),
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                        ),
                       ),
                     ),
                     IconButton(
@@ -1512,19 +2397,24 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
                     aspectRatio: 2 / 3,
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(16),
-                      child: card.assetPath != null
-                          ? Image.asset(card.assetPath!, fit: BoxFit.contain)
-                          : CardFallbackLarge(card: card),
+                      child: CardFace(card: card),
                     ),
                   ),
                 ),
                 const SizedBox(height: 12),
                 Text(
                   '${categoryName(card.type)} • ${card.value}',
-                  style: const TextStyle(color: kMint, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                    color: kMint,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 const SizedBox(height: 6),
-                Text(card.effect, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
+                Text(
+                  card.effect,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70),
+                ),
               ],
             ),
           ),
@@ -1551,7 +2441,10 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
                   SizedBox(
                     height: 54,
                     child: ListView.separated(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
                       scrollDirection: Axis.horizontal,
                       itemCount: filters.length,
                       separatorBuilder: (_, __) => const SizedBox(width: 7),
@@ -1563,7 +2456,9 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
                           selected: selected,
                           onSelected: (_) => setState(() => filter = type),
                           selectedColor: const Color(0xFF14642A),
-                          side: BorderSide(color: selected ? kNeon : Colors.white24),
+                          side: BorderSide(
+                            color: selected ? kNeon : Colors.white24,
+                          ),
                         );
                       },
                     ),
@@ -1571,12 +2466,13 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
                   Expanded(
                     child: GridView.builder(
                       padding: const EdgeInsets.fromLTRB(12, 6, 12, 24),
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 2,
-                        childAspectRatio: 0.67,
-                        crossAxisSpacing: 10,
-                        mainAxisSpacing: 10,
-                      ),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            childAspectRatio: 0.67,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 10,
+                          ),
                       itemCount: cards.length,
                       itemBuilder: (_, index) {
                         final card = cards[index];
@@ -1584,13 +2480,7 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
                           onTap: () => showDetail(card),
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(14),
-                            child: card.assetPath != null
-                                ? Image.asset(
-                                    card.assetPath!,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => CardFallbackLarge(card: card),
-                                  )
-                                : CardFallbackLarge(card: card),
+                            child: CardFace(card: card),
                           ),
                         );
                       },
@@ -1607,12 +2497,14 @@ class _CardsOverviewScreenState extends State<CardsOverviewScreen> {
 }
 
 class GameScreen extends StatefulWidget {
+  final CoinMatch? coinMatch;
   final List<String> players;
   final List<String> avatarAssets;
   final List<bool> botPlayers;
 
   const GameScreen({
     super.key,
+    this.coinMatch,
     required this.players,
     required this.avatarAssets,
     required this.botPlayers,
@@ -1643,6 +2535,8 @@ class _GameScreenState extends State<GameScreen> {
   int? selectedCardIndex;
 
   bool _botBusy = false;
+  bool _resolvingPlay = false;
+  bool _autoAdvancePending = false;
   bool hasDrawn = false;
   bool turnFinished = false;
 
@@ -1654,6 +2548,7 @@ class _GameScreenState extends State<GameScreen> {
   @override
   void initState() {
     super.initState();
+    widget.coinMatch?.started = true;
     lockLandscapeOrientation();
     totalScores = List<int>.filled(widget.players.length, 0);
     roundWins = List<int>.filled(widget.players.length, 0);
@@ -1668,7 +2563,8 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   bool get isBotTurn =>
-      currentPlayer < widget.botPlayers.length && widget.botPlayers[currentPlayer];
+      currentPlayer < widget.botPlayers.length &&
+      widget.botPlayers[currentPlayer];
 
   // ==========================================================
   // RUNDE STARTEN
@@ -1855,15 +2751,14 @@ class _GameScreenState extends State<GameScreen> {
       finalTurnsRemaining
         ..clear()
         ..addAll(
-          List.generate(widget.players.length, (i) => i)
-              .where((i) => i != currentPlayer),
+          List.generate(
+            widget.players.length,
+            (i) => i,
+          ).where((i) => i != currentPlayer),
         );
     });
 
-    GameFeedback.trigger(
-      'sound_knock.wav',
-      haptic: GameHaptic.heavy,
-    );
+    GameFeedback.trigger('sound_knock.wav', haptic: GameHaptic.heavy);
     showMessage('🤖 ${widget.players[currentPlayer]} klopft!');
     await moveToNextFinalPlayer();
   }
@@ -1901,7 +2796,9 @@ class _GameScreenState extends State<GameScreen> {
   // ==========================================================
 
   void drawCard() {
-    if (hasDrawn || turnFinished || knockActive && currentPlayer == knockingPlayer) {
+    if (hasDrawn ||
+        turnFinished ||
+        knockActive && currentPlayer == knockingPlayer) {
       return;
     }
 
@@ -1917,10 +2814,7 @@ class _GameScreenState extends State<GameScreen> {
       selectedCardIndex = null;
     });
 
-    GameFeedback.trigger(
-      'sound_draw.wav',
-      haptic: GameHaptic.light,
-    );
+    GameFeedback.trigger('sound_draw.wav', haptic: GameHaptic.light);
   }
 
   void drawDiscardCard() {
@@ -1936,10 +2830,7 @@ class _GameScreenState extends State<GameScreen> {
       selectedCardIndex = null;
     });
 
-    GameFeedback.trigger(
-      'sound_draw.wav',
-      haptic: GameHaptic.light,
-    );
+    GameFeedback.trigger('sound_draw.wav', haptic: GameHaptic.light);
 
     showMessage('Du hast ${card.title} vom Ablagestapel genommen.');
   }
@@ -1949,7 +2840,7 @@ class _GameScreenState extends State<GameScreen> {
   // ==========================================================
 
   void selectCard(int index) {
-    if (turnFinished || isBotTurn) return;
+    if (turnFinished || isBotTurn || _resolvingPlay) return;
     setState(() {
       selectedCardIndex = selectedCardIndex == index ? null : index;
     });
@@ -1957,8 +2848,11 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Future<void> playSelectedCard() async {
+    if (_resolvingPlay || _autoAdvancePending || roundEnding) return;
     if (!hasDrawn) {
-      showMessage('Ziehe zuerst eine Karte. Danach kannst du eine Karte spielen.');
+      showMessage(
+        'Ziehe zuerst eine Karte. Danach kannst du eine Karte spielen.',
+      );
       return;
     }
 
@@ -1973,26 +2867,60 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     final card = hands[currentPlayer][selectedCardIndex!];
+    _resolvingPlay = true;
+    try {
+      switch (card.type) {
+        case CardType.grass:
+          playPlantCard(card, grassSlots, 'Gras');
+          break;
+        case CardType.energy:
+          playPlantCard(card, energySlots, 'Energie');
+          break;
+        case CardType.base:
+          playPlantCard(card, baseSlots, 'Basis');
+          break;
+        case CardType.attack:
+          await playAttackCard(card);
+          break;
+        case CardType.defense:
+          showMessage(
+            'Verteidigungskarten werden bei einem Angriff eingesetzt.',
+          );
+          break;
+        case CardType.action:
+          await playActionCard(card);
+          break;
+      }
+    } finally {
+      _resolvingPlay = false;
+    }
+    // Target selection, defense and excess-card dialogs have all completed.
+    await _advanceHumanTurnAutomatically();
+  }
 
-    switch (card.type) {
-      case CardType.grass:
-        playPlantCard(card, grassSlots, 'Gras');
-        break;
-      case CardType.energy:
-        playPlantCard(card, energySlots, 'Energie');
-        break;
-      case CardType.base:
-        playPlantCard(card, baseSlots, 'Basis');
-        break;
-      case CardType.attack:
-        await playAttackCard(card);
-        break;
-      case CardType.defense:
-        showMessage('Verteidigungskarten werden bei einem Angriff eingesetzt.');
-        break;
-      case CardType.action:
-        await playActionCard(card);
-        break;
+  Future<void> _advanceHumanTurnAutomatically() async {
+    // Bots already await nextPlayer in their own turn loop.
+    if (!mounted ||
+        isBotTurn ||
+        !turnFinished ||
+        roundEnding ||
+        _resolvingPlay ||
+        _autoAdvancePending)
+      return;
+    _autoAdvancePending = true;
+    final playerAtEnd = currentPlayer;
+    final roundAtEnd = roundNumber;
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      if (!mounted ||
+          roundEnding ||
+          currentPlayer != playerAtEnd ||
+          roundNumber != roundAtEnd ||
+          !turnFinished)
+        return;
+      await nextPlayer();
+    } finally {
+      _autoAdvancePending = false;
     }
   }
 
@@ -2012,10 +2940,7 @@ class _GameScreenState extends State<GameScreen> {
       turnFinished = true;
     });
 
-    GameFeedback.trigger(
-      'sound_play.wav',
-      haptic: GameHaptic.medium,
-    );
+    GameFeedback.trigger('sound_play.wav', haptic: GameHaptic.medium);
   }
 
   // ==========================================================
@@ -2031,20 +2956,24 @@ class _GameScreenState extends State<GameScreen> {
         final grass = grassSlots[currentPlayer];
 
         if (grass == null) {
-          showMessage('Dünger geht erst, wenn bereits eine Gras-Karte in deiner Plantage liegt.');
+          showMessage(
+            'Dünger geht erst, wenn bereits eine Gras-Karte in deiner Plantage liegt.',
+          );
           return;
         }
 
         if (grass.power >= 200) {
-          showMessage('Dein Gras steht bereits bei 200 g – höher geht es nicht.');
+          showMessage(
+            'Dein Gras steht bereits bei 200 g – höher geht es nicht.',
+          );
           return;
         }
 
         final newPower = grass.power == 20
             ? 50
             : grass.power == 50
-                ? 100
-                : 200;
+            ? 100
+            : 200;
 
         setState(() {
           grassSlots[currentPlayer] = grassCard(newPower);
@@ -2058,7 +2987,9 @@ class _GameScreenState extends State<GameScreen> {
 
       case 'Übertopf':
         if (grassSlots[currentPlayer] == null) {
-          showMessage('Übertopf geht erst, wenn eine Gras-Karte in deiner Plantage liegt.');
+          showMessage(
+            'Übertopf geht erst, wenn eine Gras-Karte in deiner Plantage liegt.',
+          );
           return;
         }
 
@@ -2069,14 +3000,18 @@ class _GameScreenState extends State<GameScreen> {
         });
 
         GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
-        showMessage('🪴 Übertopf: Dein Gras ist bis zu deinem nächsten eigenen Zug geschützt.');
+        showMessage(
+          '🪴 Übertopf: Dein Gras ist bis zu deinem nächsten eigenen Zug geschützt.',
+        );
         return;
 
       case 'Beste Freunde':
         // Nach dem normalen Ziehen sind in der Regel genug Handkarten vorhanden.
         // Die Aktionskarte selbst wird erst nach der Zielwahl entfernt.
         if (hands[currentPlayer].length <= 1) {
-          showMessage('Du brauchst neben „Beste Freunde“ noch mindestens eine weitere Handkarte.');
+          showMessage(
+            'Du brauchst neben „Beste Freunde“ noch mindestens eine weitere Handkarte.',
+          );
           return;
         }
 
@@ -2090,7 +3025,9 @@ class _GameScreenState extends State<GameScreen> {
         }
 
         if (hands[target].isEmpty) {
-          showMessage('${widget.players[target]} hat keine Handkarte zum Tauschen.');
+          showMessage(
+            '${widget.players[target]} hat keine Handkarte zum Tauschen.',
+          );
           return;
         }
 
@@ -2116,7 +3053,9 @@ class _GameScreenState extends State<GameScreen> {
         });
 
         GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
-        showMessage('🤝 Beste Freunde: Ihr habt blind je eine Handkarte getauscht.');
+        showMessage(
+          '🤝 Beste Freunde: Ihr habt blind je eine Handkarte getauscht.',
+        );
         return;
 
       case 'Gartenschere':
@@ -2158,7 +3097,7 @@ class _GameScreenState extends State<GameScreen> {
 
         if (mounted) {
           GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
-        showMessage('✂️ Gartenschere: Du hast 2 gezogen und 1 behalten.');
+          showMessage('✂️ Gartenschere: Du hast 2 gezogen und 1 behalten.');
         }
         return;
 
@@ -2200,7 +3139,7 @@ class _GameScreenState extends State<GameScreen> {
 
         if (mounted) {
           GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
-        showMessage('🍀 Glückstreffer: Du hast 3 gezogen und 1 behalten.');
+          showMessage('🍀 Glückstreffer: Du hast 3 gezogen und 1 behalten.');
         }
         return;
 
@@ -2222,7 +3161,9 @@ class _GameScreenState extends State<GameScreen> {
 
         if (mounted) {
           GameFeedback.trigger('sound_action.wav', haptic: GameHaptic.medium);
-        showMessage('😎 Ich zieh mir zwei: ${drawn.length} zusätzliche Karten gezogen.');
+          showMessage(
+            '😎 Ich zieh mir zwei: ${drawn.length} zusätzliche Karten gezogen.',
+          );
         }
         return;
 
@@ -2256,7 +3197,10 @@ class _GameScreenState extends State<GameScreen> {
               children: [
                 for (int i = 0; i < cards.length; i++)
                   ListTile(
-                    leading: Text(cardIcon(cards[i].type), style: const TextStyle(fontSize: 25)),
+                    leading: Text(
+                      cardIcon(cards[i].type),
+                      style: const TextStyle(fontSize: 25),
+                    ),
                     title: Text(cards[i].title),
                     subtitle: Text('${cards[i].value} – ${cards[i].effect}'),
                     onTap: () => Navigator.pop(context, i),
@@ -2286,7 +3230,10 @@ class _GameScreenState extends State<GameScreen> {
                   const SizedBox(height: 10),
                   for (int i = 0; i < hands[currentPlayer].length; i++)
                     ListTile(
-                      leading: Text(cardIcon(hands[currentPlayer][i].type), style: const TextStyle(fontSize: 23)),
+                      leading: Text(
+                        cardIcon(hands[currentPlayer][i].type),
+                        style: const TextStyle(fontSize: 23),
+                      ),
                       title: Text(hands[currentPlayer][i].title),
                       subtitle: Text(hands[currentPlayer][i].value),
                       onTap: () => Navigator.pop(context, i),
@@ -2344,11 +3291,10 @@ class _GameScreenState extends State<GameScreen> {
         turnFinished = true;
       });
 
-      GameFeedback.trigger(
-        'sound_defend.wav',
-        haptic: GameHaptic.heavy,
+      GameFeedback.trigger('sound_defend.wav', haptic: GameHaptic.heavy);
+      showMessage(
+        '${widget.players[target]} wehrt ${attack.title} mit ${defense.title} ab!',
       );
-      showMessage('${widget.players[target]} wehrt ${attack.title} mit ${defense.title} ab!');
       return;
     }
 
@@ -2362,10 +3308,7 @@ class _GameScreenState extends State<GameScreen> {
       turnFinished = true;
     });
 
-    GameFeedback.trigger(
-      'sound_attack.wav',
-      haptic: GameHaptic.heavy,
-    );
+    GameFeedback.trigger('sound_attack.wav', haptic: GameHaptic.heavy);
     showMessage(resultMessage);
   }
 
@@ -2407,16 +3350,19 @@ class _GameScreenState extends State<GameScreen> {
         continue;
       }
 
-      if (attack.title == 'Stromausfall' && defense.title == 'Sicherungskasten') {
+      if (attack.title == 'Stromausfall' &&
+          defense.title == 'Sicherungskasten') {
         result.add(i);
       }
       if (attack.title == 'Energiediebstahl' && defense.title == 'Wachhund') {
         result.add(i);
       }
-      if (attack.title == 'Schädlingsbefall' && defense.title == 'Schädlingsmittel') {
+      if (attack.title == 'Schädlingsbefall' &&
+          defense.title == 'Schädlingsmittel') {
         result.add(i);
       }
-      if ((attack.title == 'Razzia' || attack.title == 'Zu platt') && defense.title == 'Anwalt') {
+      if ((attack.title == 'Razzia' || attack.title == 'Zu platt') &&
+          defense.title == 'Anwalt') {
         result.add(i);
       }
     }
@@ -2452,9 +3398,15 @@ class _GameScreenState extends State<GameScreen> {
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('${attack.title}\n${attack.effect}', textAlign: TextAlign.center),
+              Text(
+                '${attack.title}\n${attack.effect}',
+                textAlign: TextAlign.center,
+              ),
               const SizedBox(height: 20),
-              const Text('Verteidigung einsetzen?', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text(
+                'Verteidigung einsetzen?',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 10),
               for (final index in defenseIndices)
                 ListTile(
@@ -2478,10 +3430,16 @@ class _GameScreenState extends State<GameScreen> {
     switch (attack.title) {
       case 'Stromausfall':
         final energy = energySlots[target];
-        if (energy == null) return '${widget.players[target]} hat noch keine Energie.';
-        if (energy.power <= 25) return '${widget.players[target]} ist bereits bei 25 %.';
+        if (energy == null)
+          return '${widget.players[target]} hat noch keine Energie.';
+        if (energy.power <= 25)
+          return '${widget.players[target]} ist bereits bei 25 %.';
 
-        final newPower = energy.power == 100 ? 75 : energy.power == 75 ? 50 : 25;
+        final newPower = energy.power == 100
+            ? 75
+            : energy.power == 75
+            ? 50
+            : 25;
         energySlots[target] = energyCard(newPower);
         return '${widget.players[target]}: Energie sinkt auf $newPower %.';
 
@@ -2503,15 +3461,22 @@ class _GameScreenState extends State<GameScreen> {
         }
 
         final grass = grassSlots[target];
-        if (grass == null) return '${widget.players[target]} hat noch kein Gras.';
-        if (grass.power <= 20) return '${widget.players[target]} ist bereits bei 20 g.';
+        if (grass == null)
+          return '${widget.players[target]} hat noch kein Gras.';
+        if (grass.power <= 20)
+          return '${widget.players[target]} ist bereits bei 20 g.';
 
-        final newPower = grass.power == 200 ? 100 : grass.power == 100 ? 50 : 20;
+        final newPower = grass.power == 200
+            ? 100
+            : grass.power == 100
+            ? 50
+            : 20;
         grassSlots[target] = grassCard(newPower);
         return '${widget.players[target]}: Gras sinkt auf $newPower g.';
 
       case 'Razzia':
-        if (hands[target].isEmpty) return '${widget.players[target]} hat keine Handkarte.';
+        if (hands[target].isEmpty)
+          return '${widget.players[target]} hat keine Handkarte.';
 
         final index = random.nextInt(hands[target].length);
         final lostCard = hands[target].removeAt(index);
@@ -2532,7 +3497,12 @@ class _GameScreenState extends State<GameScreen> {
   // ==========================================================
 
   void discardSelectedCard() {
-    if (!hasDrawn || turnFinished) return;
+    if (!hasDrawn ||
+        turnFinished ||
+        _resolvingPlay ||
+        _autoAdvancePending ||
+        roundEnding)
+      return;
 
     if (selectedCardIndex == null) {
       showMessage('Wähle zuerst eine Karte aus.');
@@ -2546,16 +3516,12 @@ class _GameScreenState extends State<GameScreen> {
       turnFinished = true;
     });
 
-    GameFeedback.trigger(
-      'sound_play.wav',
-      haptic: GameHaptic.light,
-    );
+    GameFeedback.trigger('sound_play.wav', haptic: GameHaptic.light);
+    _advanceHumanTurnAutomatically();
   }
 
   bool automaticRoundEndReached() {
-    return completedTurns.every(
-      (turns) => turns >= maxTurnsPerPlayerPerRound,
-    );
+    return completedTurns.every((turns) => turns >= maxTurnsPerPlayerPerRound);
   }
 
   // ==========================================================
@@ -2581,7 +3547,9 @@ class _GameScreenState extends State<GameScreen> {
       if (knockActive) {
         showMessage('Es wurde in dieser Runde bereits geklopft.');
       } else if (hasDrawn || turnFinished) {
-        showMessage('Klopfen geht nur zu Beginn deines Zuges – bevor du eine Karte ziehst.');
+        showMessage(
+          'Klopfen geht nur zu Beginn deines Zuges – bevor du eine Karte ziehst.',
+        );
       } else if (completedTurns[currentPlayer] < 2) {
         showMessage('Klopfen ist erst ab deinem 3. eigenen Zug möglich.');
       } else if (!plantationComplete(currentPlayer)) {
@@ -2621,15 +3589,14 @@ class _GameScreenState extends State<GameScreen> {
       finalTurnsRemaining
         ..clear()
         ..addAll(
-          List.generate(widget.players.length, (i) => i)
-              .where((i) => i != currentPlayer),
+          List.generate(
+            widget.players.length,
+            (i) => i,
+          ).where((i) => i != currentPlayer),
         );
     });
 
-    GameFeedback.trigger(
-      'sound_knock.wav',
-      haptic: GameHaptic.heavy,
-    );
+    GameFeedback.trigger('sound_knock.wav', haptic: GameHaptic.heavy);
     showMessage('${widget.players[currentPlayer]} hat geklopft!');
     await moveToNextFinalPlayer();
   }
@@ -2652,9 +3619,7 @@ class _GameScreenState extends State<GameScreen> {
     completedTurns[currentPlayer]++;
 
     if (!knockActive && automaticRoundEndReached()) {
-      await finishRound(
-        reason: 'Maximale Rundendauer erreicht',
-      );
+      await finishRound(reason: 'Maximale Rundendauer erreicht');
       return;
     }
 
@@ -2683,9 +3648,7 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     if (!knockActive && automaticRoundEndReached()) {
-      await finishRound(
-        reason: 'Maximale Rundendauer erreicht',
-      );
+      await finishRound(reason: 'Maximale Rundendauer erreicht');
       return;
     }
 
@@ -2728,7 +3691,9 @@ class _GameScreenState extends State<GameScreen> {
 
         if (finalTurnsRemaining.isEmpty) {
           if (skippedPlayers.isNotEmpty) {
-            showMessage('${skippedPlayers.join(', ')} setzt den letzten Zug aus.');
+            showMessage(
+              '${skippedPlayers.join(', ')} setzt den letzten Zug aus.',
+            );
           }
           await finishRound();
           return;
@@ -2767,17 +3732,12 @@ class _GameScreenState extends State<GameScreen> {
     return (grass.power * (energy.power / 100) * base.power).round();
   }
 
-  Future<void> finishRound({
-    String reason = 'Klopfen',
-  }) async {
+  Future<void> finishRound({String reason = 'Klopfen'}) async {
     if (roundEnding) return;
 
     roundEnding = true;
 
-    GameFeedback.trigger(
-      'sound_round.wav',
-      haptic: GameHaptic.medium,
-    );
+    GameFeedback.trigger('sound_round.wav', haptic: GameHaptic.medium);
 
     final rawScores = List<int>.generate(
       widget.players.length,
@@ -2871,14 +3831,42 @@ class _GameScreenState extends State<GameScreen> {
     if (!mounted) return;
 
     if (roundNumber >= 4) {
-      GameFeedback.trigger(
-        'sound_win.wav',
-        haptic: GameHaptic.heavy,
-      );
+      int? payout;
+      try {
+        payout = await TestWallet.instance.settle(
+          widget.coinMatch,
+          totalScores,
+          roundWins,
+        );
+      } catch (error) {
+        if (mounted) {
+          await showDialog<void>(
+            context: context,
+            barrierDismissible: false,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Guthaben nicht gespeichert'),
+              content: Text('$error\nBitte erneut versuchen.'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('ERNEUT VERSUCHEN'),
+                ),
+              ],
+            ),
+          );
+          // Keep the final scores intact; retry settlement without another round.
+          if (mounted) _retryCoinSettlement();
+        }
+        return;
+      }
+      if (!mounted) return;
+      GameFeedback.trigger('sound_win.wav', haptic: GameHaptic.heavy);
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
           builder: (_) => FinalScoreScreen(
+            coinPayout: payout,
+            entryFee: widget.coinMatch?.fee ?? 0,
             players: widget.players,
             totalScores: totalScores,
             roundWins: roundWins,
@@ -2893,6 +3881,46 @@ class _GameScreenState extends State<GameScreen> {
       startRound();
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeRunBotTurn());
+  }
+
+  Future<void> _retryCoinSettlement() async {
+    try {
+      final payout = await TestWallet.instance.settle(
+        widget.coinMatch,
+        totalScores,
+        roundWins,
+      );
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => FinalScoreScreen(
+            players: widget.players,
+            totalScores: totalScores,
+            roundWins: roundWins,
+            coinPayout: payout,
+            entryFee: widget.coinMatch?.fee ?? 0,
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (c) => AlertDialog(
+          title: const Text('Speichern fehlgeschlagen'),
+          content: Text('$error'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c),
+              child: const Text('ERNEUT VERSUCHEN'),
+            ),
+          ],
+        ),
+      );
+      if (mounted) _retryCoinSettlement();
+    }
   }
 
   Future<void> showCardZoom(GameCard card) async {
@@ -2935,13 +3963,7 @@ class _GameScreenState extends State<GameScreen> {
                         aspectRatio: 2 / 3,
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(18),
-                          child: card.assetPath != null
-                              ? Image.asset(
-                                  card.assetPath!,
-                                  fit: BoxFit.contain,
-                                  errorBuilder: (_, __, ___) => CardFallbackLarge(card: card),
-                                )
-                              : CardFallbackLarge(card: card),
+                          child: CardFace(card: card),
                         ),
                       ),
                     ),
@@ -3017,10 +4039,7 @@ class _GameScreenState extends State<GameScreen> {
                 const SizedBox(height: 6),
                 const Text(
                   'Offene Plantage – Handkarten bleiben geheim',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 10,
-                  ),
+                  style: TextStyle(color: Colors.white54, fontSize: 10),
                 ),
                 const SizedBox(height: 14),
                 Row(
@@ -3087,7 +4106,7 @@ class _GameScreenState extends State<GameScreen> {
           ),
           content: const Text(
             'Das aktuelle Spiel wird beendet und du kehrst zum Hauptmenü zurück. '
-            'Der aktuelle Spielstand dieser Partie geht verloren.',
+            'Der aktuelle Spielstand und der Münzeinsatz dieser Partie gehen verloren.',
           ),
           actions: [
             TextButton(
@@ -3120,10 +4139,7 @@ class _GameScreenState extends State<GameScreen> {
   void showMessage(String text) {
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(text),
-        duration: const Duration(seconds: 3),
-      ),
+      SnackBar(content: Text(text), duration: const Duration(seconds: 3)),
     );
   }
 
@@ -3149,7 +4165,10 @@ class _GameScreenState extends State<GameScreen> {
                     Text(
                       'BITTE IPHONE QUER HALTEN',
                       textAlign: TextAlign.center,
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                      ),
                     ),
                     SizedBox(height: 8),
                     Text(
@@ -3202,7 +4221,10 @@ class _GameScreenState extends State<GameScreen> {
               final veryLow = constraints.maxHeight < 350;
               final topHeight = veryLow ? 72.0 : 82.0;
               final centerHeight = veryLow ? 108.0 : 120.0;
-              final handHeight = max(110.0, constraints.maxHeight - topHeight - centerHeight - 18);
+              final handHeight = max(
+                110.0,
+                constraints.maxHeight - topHeight - centerHeight - 18,
+              );
 
               return Stack(
                 children: [
@@ -3217,7 +4239,10 @@ class _GameScreenState extends State<GameScreen> {
                               children: [
                                 Expanded(
                                   child: opponents.isNotEmpty
-                                      ? playerPanel(opponents.first, reverse: false)
+                                      ? playerPanel(
+                                          opponents.first,
+                                          reverse: false,
+                                        )
                                       : const SizedBox.shrink(),
                                 ),
                                 const SizedBox(width: 8),
@@ -3225,7 +4250,8 @@ class _GameScreenState extends State<GameScreen> {
                                   width: veryLow ? 116 : 132,
                                   child: RoundCenterBadge(
                                     roundNumber: roundNumber,
-                                    currentTurn: completedTurns[currentPlayer] + 1,
+                                    currentTurn:
+                                        completedTurns[currentPlayer] + 1,
                                     deckRemaining: deck.length,
                                   ),
                                 ),
@@ -3248,13 +4274,15 @@ class _GameScreenState extends State<GameScreen> {
                                   flex: 10,
                                   child: CurrentPlantationPanel(
                                     playerIndex: currentPlayer,
-                                    avatarAsset: widget.avatarAssets[currentPlayer],
+                                    avatarAsset:
+                                        widget.avatarAssets[currentPlayer],
                                     name: widget.players[currentPlayer],
                                     score: points,
                                     grass: grassSlots[currentPlayer],
                                     energy: energySlots[currentPlayer],
                                     base: baseSlots[currentPlayer],
-                                    grassProtected: grassProtected[currentPlayer],
+                                    grassProtected:
+                                        grassProtected[currentPlayer],
                                     onCardTap: (card) {
                                       if (card != null) showCardZoom(card);
                                     },
@@ -3265,10 +4293,16 @@ class _GameScreenState extends State<GameScreen> {
                                   flex: 8,
                                   child: CenterCardTable(
                                     deckRemaining: deck.length,
-                                    canDraw: !isBotTurn && !hasDrawn && deck.isNotEmpty,
+                                    canDraw:
+                                        !isBotTurn &&
+                                        !hasDrawn &&
+                                        deck.isNotEmpty,
                                     onDraw: drawCard,
                                     topDiscard: topDiscard,
-                                    canTakeDiscard: !isBotTurn && !hasDrawn && topDiscard != null,
+                                    canTakeDiscard:
+                                        !isBotTurn &&
+                                        !hasDrawn &&
+                                        topDiscard != null,
                                     onTakeDiscard: drawDiscardCard,
                                     onZoomDiscard: topDiscard == null
                                         ? null
@@ -3284,11 +4318,11 @@ class _GameScreenState extends State<GameScreen> {
                                     knockActive: knockActive,
                                     knockReady: knockReady,
                                     complete: complete,
-                                    completedTurns: completedTurns[currentPlayer],
+                                    completedTurns:
+                                        completedTurns[currentPlayer],
                                     onPlay: playSelectedCard,
                                     onDiscard: discardSelectedCard,
                                     onKnock: knock,
-                                    onNext: nextPlayer,
                                   ),
                                 ),
                               ],
@@ -3308,13 +4342,17 @@ class _GameScreenState extends State<GameScreen> {
                                   SizedBox(
                                     width: veryLow ? 98 : 112,
                                     child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
                                       children: [
                                         GraskoenigAvatar(
                                           playerIndex: currentPlayer,
-                                          assetPath: widget.avatarAssets[currentPlayer],
+                                          assetPath: widget
+                                              .avatarAssets[currentPlayer],
                                           size: veryLow ? 42 : 50,
-                                          borderColor: playerAccent(currentPlayer),
+                                          borderColor: playerAccent(
+                                            currentPlayer,
+                                          ),
                                           active: true,
                                         ),
                                         const SizedBox(height: 3),
@@ -3329,7 +4367,9 @@ class _GameScreenState extends State<GameScreen> {
                                           ),
                                         ),
                                         Text(
-                                          hasDrawn ? 'KARTE SPIELEN' : 'ZUERST ZIEHEN',
+                                          hasDrawn
+                                              ? 'KARTE SPIELEN'
+                                              : 'ZUERST ZIEHEN',
                                           textAlign: TextAlign.center,
                                           style: TextStyle(
                                             fontSize: 8,
@@ -3346,7 +4386,9 @@ class _GameScreenState extends State<GameScreen> {
                                       children: [
                                         if (knockActive)
                                           Padding(
-                                            padding: const EdgeInsets.only(bottom: 2),
+                                            padding: const EdgeInsets.only(
+                                              bottom: 2,
+                                            ),
                                             child: Text(
                                               '👊 ${widget.players[knockingPlayer!]} hat geklopft – letzter Zug!',
                                               textAlign: TextAlign.center,
@@ -3358,18 +4400,75 @@ class _GameScreenState extends State<GameScreen> {
                                             ),
                                           ),
                                         Expanded(
-                                          child: HandFan(
-                                            hand: hand,
-                                            selectedIndex: selectedCardIndex,
-                                            onSelect: selectCard,
-                                            onZoom: showCardZoom,
-                                            cardWidth: veryLow ? 72 : 82,
-                                            cardHeight: veryLow ? 104 : 120,
-                                            fanHeight: handHeight,
-                                            minStep: veryLow ? 30 : 34,
-                                          ),
+                                          child: isBotTurn
+                                              ? FittedBox(
+                                                  fit: BoxFit.scaleDown,
+                                                  child: SizedBox(
+                                                    height: veryLow ? 92 : 110,
+                                                    child: Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                        for (
+                                                          int i = 0;
+                                                          i < hand.length;
+                                                          i++
+                                                        )
+                                                          Padding(
+                                                            padding:
+                                                                const EdgeInsets.symmetric(
+                                                                  horizontal: 2,
+                                                                ),
+                                                            child: SizedBox(
+                                                              width: veryLow
+                                                                  ? 34
+                                                                  : 42,
+                                                              child: ClipRRect(
+                                                                borderRadius:
+                                                                    BorderRadius.circular(
+                                                                      6,
+                                                                    ),
+                                                                child: Image.asset(
+                                                                  'assets/cards/back.jpg',
+                                                                  fit: BoxFit
+                                                                      .cover,
+                                                                  errorBuilder: (_, __, ___) => Container(
+                                                                    color:
+                                                                        kPanel2,
+                                                                    alignment:
+                                                                        Alignment
+                                                                            .center,
+                                                                    child: const Icon(
+                                                                      Icons
+                                                                          .forest,
+                                                                      color:
+                                                                          kMint,
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                )
+                                              : HandFan(
+                                                  hand: hand,
+                                                  selectedIndex:
+                                                      selectedCardIndex,
+                                                  onSelect: selectCard,
+                                                  onZoom: showCardZoom,
+                                                  cardWidth: veryLow ? 72 : 82,
+                                                  cardHeight: veryLow
+                                                      ? 104
+                                                      : 120,
+                                                  fanHeight: handHeight,
+                                                  minStep: veryLow ? 30 : 34,
+                                                ),
                                         ),
-                                        if (selectedCardIndex != null)
+                                        if (!isBotTurn &&
+                                            selectedCardIndex != null)
                                           Text(
                                             'Ausgewählt: ${hand[selectedCardIndex!].title}',
                                             textAlign: TextAlign.center,
@@ -3410,13 +4509,17 @@ class _GameScreenState extends State<GameScreen> {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     ListTile(
-                                      leading: const Icon(Icons.menu_book_outlined),
+                                      leading: const Icon(
+                                        Icons.menu_book_outlined,
+                                      ),
                                       title: const Text('Regeln ansehen'),
                                       onTap: () {
                                         Navigator.pop(context);
                                         Navigator.push(
                                           context,
-                                          MaterialPageRoute(builder: (_) => const RulesScreen()),
+                                          MaterialPageRoute(
+                                            builder: (_) => const RulesScreen(),
+                                          ),
                                         );
                                       },
                                     ),
@@ -3427,24 +4530,35 @@ class _GameScreenState extends State<GameScreen> {
                                         Navigator.pop(context);
                                         Navigator.push(
                                           context,
-                                          MaterialPageRoute(builder: (_) => const CardsOverviewScreen()),
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                const CardsOverviewScreen(),
+                                          ),
                                         );
                                       },
                                     ),
                                     ListTile(
-                                      leading: const Icon(Icons.settings_outlined),
+                                      leading: const Icon(
+                                        Icons.settings_outlined,
+                                      ),
                                       title: const Text('Ton & Vibration'),
                                       onTap: () {
                                         Navigator.pop(context);
                                         Navigator.push(
                                           context,
-                                          MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                const SettingsScreen(),
+                                          ),
                                         );
                                       },
                                     ),
                                     const Divider(color: Colors.white12),
                                     ListTile(
-                                      leading: const Icon(Icons.flag_outlined, color: Color(0xFFFF6B6B)),
+                                      leading: const Icon(
+                                        Icons.flag_outlined,
+                                        color: Color(0xFFFF6B6B),
+                                      ),
                                       title: const Text(
                                         'Spiel aufgeben',
                                         style: TextStyle(
@@ -3454,7 +4568,10 @@ class _GameScreenState extends State<GameScreen> {
                                       ),
                                       onTap: () {
                                         Navigator.pop(context);
-                                        Future.delayed(Duration.zero, confirmGiveUp);
+                                        Future.delayed(
+                                          Duration.zero,
+                                          confirmGiveUp,
+                                        );
                                       },
                                     ),
                                   ],
@@ -3475,9 +4592,7 @@ class _GameScreenState extends State<GameScreen> {
       ),
     );
   }
-
 }
-
 
 class GraskoenigAvatar extends StatelessWidget {
   final int playerIndex;
@@ -3502,21 +4617,17 @@ class GraskoenigAvatar extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        border: Border.all(color: active ? kGold : borderColor, width: active ? 3 : 2),
+        border: Border.all(
+          color: active ? kGold : borderColor,
+          width: active ? 3 : 2,
+        ),
         boxShadow: active
             ? const [BoxShadow(color: Color(0x6659FF7C), blurRadius: 10)]
             : null,
       ),
       child: ClipOval(
-        child: Image.asset(
-          assetPath ?? playerAvatarAsset(playerIndex),
-          fit: BoxFit.cover,
-          alignment: Alignment.topCenter,
-          errorBuilder: (_, __, ___) => Container(
-            color: borderColor,
-            alignment: Alignment.center,
-            child: const Icon(Icons.person, color: Colors.black87),
-          ),
+        child: CharacterPortrait(
+          asset: assetPath ?? playerAvatarAsset(playerIndex),
         ),
       ),
     );
@@ -3558,20 +4669,20 @@ class MiniPlantCard extends StatelessWidget {
         child: Stack(
           children: [
             Positioned.fill(
-              child: card?.assetPath != null
-                  ? Image.asset(
-                      card!.assetPath!,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => Center(
-                        child: Text(icon, style: const TextStyle(fontSize: 21)),
-                      ),
-                    )
+              child: card != null
+                  ? CardFace(card: card!)
                   : Center(
-                      child: Text(icon, style: const TextStyle(fontSize: 21, color: Colors.white30)),
+                      child: Text(
+                        icon,
+                        style: const TextStyle(
+                          fontSize: 21,
+                          color: Colors.white30,
+                        ),
+                      ),
                     ),
             ),
             Positioned(
-              left: 2,
+              left: card == null ? 2 : 18,
               right: 2,
               bottom: 2,
               child: Container(
@@ -3585,7 +4696,10 @@ class MiniPlantCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 7.5, fontWeight: FontWeight.w900),
+                  style: const TextStyle(
+                    fontSize: 7.5,
+                    fontWeight: FontWeight.w900,
+                  ),
                 ),
               ),
             ),
@@ -3632,7 +4746,9 @@ class LandscapePlayerPanel extends StatelessWidget {
       child: SizedBox(
         width: 86,
         child: Row(
-          mainAxisAlignment: reverse ? MainAxisAlignment.end : MainAxisAlignment.start,
+          mainAxisAlignment: reverse
+              ? MainAxisAlignment.end
+              : MainAxisAlignment.start,
           children: [
             if (reverse) ...[
               Flexible(
@@ -3640,14 +4756,34 @@ class LandscapePlayerPanel extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900)),
-                    Text('$score P', style: const TextStyle(fontSize: 9, color: kGold, fontWeight: FontWeight.w900)),
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      '$score P',
+                      style: const TextStyle(
+                        fontSize: 9,
+                        color: kGold,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                   ],
                 ),
               ),
               const SizedBox(width: 5),
             ],
-            GraskoenigAvatar(playerIndex: playerIndex, assetPath: avatarAsset, size: 42, borderColor: accent),
+            GraskoenigAvatar(
+              playerIndex: playerIndex,
+              assetPath: avatarAsset,
+              size: 42,
+              borderColor: accent,
+            ),
             if (!reverse) ...[
               const SizedBox(width: 5),
               Flexible(
@@ -3655,8 +4791,23 @@ class LandscapePlayerPanel extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900)),
-                    Text('$score P', style: const TextStyle(fontSize: 9, color: kGold, fontWeight: FontWeight.w900)),
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      '$score P',
+                      style: const TextStyle(
+                        fontSize: 9,
+                        color: kGold,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -3669,9 +4820,20 @@ class LandscapePlayerPanel extends StatelessWidget {
     final plantation = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        MiniPlantCard(label: 'GRAS', icon: '🌿', card: grass, protected: grassProtected, onTap: onCardTap),
+        MiniPlantCard(
+          label: 'GRAS',
+          icon: '🌿',
+          card: grass,
+          protected: grassProtected,
+          onTap: onCardTap,
+        ),
         const SizedBox(width: 4),
-        MiniPlantCard(label: 'ENERGIE', icon: '⚡', card: energy, onTap: onCardTap),
+        MiniPlantCard(
+          label: 'ENERGIE',
+          icon: '⚡',
+          card: energy,
+          onTap: onCardTap,
+        ),
         const SizedBox(width: 4),
         MiniPlantCard(label: 'BASIS', icon: '👑', card: base, onTap: onCardTap),
       ],
@@ -3685,10 +4847,30 @@ class LandscapePlayerPanel extends StatelessWidget {
         border: Border.all(color: accent.withOpacity(0.6)),
       ),
       child: Row(
-        mainAxisAlignment: reverse ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: reverse
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         children: reverse
-            ? [Expanded(child: Align(alignment: Alignment.centerRight, child: plantation)), const SizedBox(width: 7), avatarBlock]
-            : [avatarBlock, const SizedBox(width: 7), Expanded(child: Align(alignment: Alignment.centerLeft, child: plantation))],
+            ? [
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: plantation,
+                  ),
+                ),
+                const SizedBox(width: 7),
+                avatarBlock,
+              ]
+            : [
+                avatarBlock,
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: plantation,
+                  ),
+                ),
+              ],
       ),
     );
   }
@@ -3732,14 +4914,35 @@ class CurrentPlantationPanel extends StatelessWidget {
         children: [
           Row(
             children: [
-              GraskoenigAvatar(playerIndex: playerIndex, assetPath: avatarAsset, size: 34, borderColor: playerAccent(playerIndex), active: true),
+              GraskoenigAvatar(
+                playerIndex: playerIndex,
+                assetPath: avatarAsset,
+                size: 34,
+                borderColor: playerAccent(playerIndex),
+                active: true,
+              ),
               const SizedBox(width: 7),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('DEINE PLANTAGE • $name', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900)),
-                    Text(score == 0 ? 'noch nicht vollständig' : '$score PUNKTE', style: TextStyle(fontSize: 9, color: score == 0 ? Colors.white54 : kNeon, fontWeight: FontWeight.w900)),
+                    Text(
+                      'DEINE PLANTAGE • $name',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      score == 0 ? 'noch nicht vollständig' : '$score PUNKTE',
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: score == 0 ? Colors.white54 : kNeon,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -3749,11 +4952,27 @@ class CurrentPlantationPanel extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              MiniPlantCard(label: 'GRAS', icon: '🌿', card: grass, protected: grassProtected, onTap: onCardTap),
+              MiniPlantCard(
+                label: 'GRAS',
+                icon: '🌿',
+                card: grass,
+                protected: grassProtected,
+                onTap: onCardTap,
+              ),
               const SizedBox(width: 5),
-              MiniPlantCard(label: 'ENERGIE', icon: '⚡', card: energy, onTap: onCardTap),
+              MiniPlantCard(
+                label: 'ENERGIE',
+                icon: '⚡',
+                card: energy,
+                onTap: onCardTap,
+              ),
               const SizedBox(width: 5),
-              MiniPlantCard(label: 'BASIS', icon: '👑', card: base, onTap: onCardTap),
+              MiniPlantCard(
+                label: 'BASIS',
+                icon: '👑',
+                card: base,
+                onTap: onCardTap,
+              ),
             ],
           ),
         ],
@@ -3786,9 +5005,22 @@ class RoundCenterBadge extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text('RUNDE $roundNumber/4', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: kGold)),
-          Text('ZUG $currentTurn', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800)),
-          Text('$deckRemaining Karten', style: const TextStyle(fontSize: 8, color: Colors.white54)),
+          Text(
+            'RUNDE $roundNumber/4',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+              color: kGold,
+            ),
+          ),
+          Text(
+            'ZUG $currentTurn',
+            style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800),
+          ),
+          Text(
+            '$deckRemaining Karten',
+            style: const TextStyle(fontSize: 8, color: Colors.white54),
+          ),
         ],
       ),
     );
@@ -3866,7 +5098,6 @@ class LandscapeActionPanel extends StatelessWidget {
   final VoidCallback onPlay;
   final VoidCallback onDiscard;
   final VoidCallback onKnock;
-  final VoidCallback onNext;
 
   const LandscapeActionPanel({
     super.key,
@@ -3879,7 +5110,6 @@ class LandscapeActionPanel extends StatelessWidget {
     required this.onPlay,
     required this.onDiscard,
     required this.onKnock,
-    required this.onNext,
   });
 
   String get knockLabel {
@@ -3919,11 +5149,11 @@ class LandscapeActionPanel extends StatelessWidget {
               ],
             )
           : turnFinished
-          ? SizedBox.expand(
-              child: FastTouchButton(
-                label: knockActive ? 'LETZTEN ZUG BEENDEN' : 'NÄCHSTER SPIELER',
-                onTap: onNext,
-                filled: true,
+          ? const Center(
+              child: Text(
+                'ZUG ABGESCHLOSSEN',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: kMint, fontWeight: FontWeight.w900),
               ),
             )
           : Column(
@@ -3937,10 +5167,7 @@ class LandscapeActionPanel extends StatelessWidget {
                 ),
                 const SizedBox(height: 5),
                 Expanded(
-                  child: FastTouchButton(
-                    label: 'ABLEGEN',
-                    onTap: onDiscard,
-                  ),
+                  child: FastTouchButton(label: 'ABLEGEN', onTap: onDiscard),
                 ),
                 const SizedBox(height: 5),
                 Expanded(
@@ -3955,7 +5182,6 @@ class LandscapeActionPanel extends StatelessWidget {
     );
   }
 }
-
 
 class FastTouchButton extends StatefulWidget {
   final String label;
@@ -4017,8 +5243,12 @@ class _FastTouchButtonState extends State<FastTouchButton> {
               color: !enabled
                   ? Colors.white.withValues(alpha: 0.05)
                   : widget.filled
-                      ? (_pressed ? const Color(0xFF128A2F) : const Color(0xFF16A638))
-                      : (_pressed ? const Color(0x55000000) : const Color(0x42000000)),
+                  ? (_pressed
+                        ? const Color(0xFF128A2F)
+                        : const Color(0xFF16A638))
+                  : (_pressed
+                        ? const Color(0x55000000)
+                        : const Color(0x42000000)),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
                 color: enabled ? accent : Colors.white12,
@@ -4032,7 +5262,9 @@ class _FastTouchButtonState extends State<FastTouchButton> {
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontWeight: FontWeight.w900,
-                  color: !enabled ? Colors.white30 : widget.accent ?? Colors.white,
+                  color: !enabled
+                      ? Colors.white30
+                      : widget.accent ?? Colors.white,
                 ),
               ),
             ),
@@ -4044,12 +5276,16 @@ class _FastTouchButtonState extends State<FastTouchButton> {
 }
 
 class FinalScoreScreen extends StatelessWidget {
+  final int? coinPayout;
+  final int entryFee;
   final List<String> players;
   final List<int> totalScores;
   final List<int> roundWins;
 
   const FinalScoreScreen({
     super.key,
+    this.coinPayout,
+    this.entryFee = 0,
     required this.players,
     required this.totalScores,
     required this.roundWins,
@@ -4065,7 +5301,9 @@ class FinalScoreScreen extends StatelessWidget {
     if (candidates.length <= 1) return candidates;
 
     final highestRoundWins = candidates.map((i) => roundWins[i]).reduce(max);
-    candidates = candidates.where((i) => roundWins[i] == highestRoundWins).toList();
+    candidates = candidates
+        .where((i) => roundWins[i] == highestRoundWins)
+        .toList();
     return candidates;
   }
 
@@ -4085,135 +5323,190 @@ class FinalScoreScreen extends StatelessWidget {
           Positioned.fill(
             child: LeafBackground(
               child: SafeArea(
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 430),
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(18, 24, 18, 28),
-                children: [
-                  const Text(
-                    'GRATULATION!',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: kNeon,
-                      fontSize: 27,
-                      fontWeight: FontWeight.w900,
-                      fontStyle: FontStyle.italic,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  const Center(child: Text('👑', style: TextStyle(fontSize: 78))),
-                  const Text(
-                    'GRASKÖNIG',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 42,
-                      fontWeight: FontWeight.w900,
-                      fontStyle: FontStyle.italic,
-                    ),
-                  ),
-                  const SizedBox(height: 7),
-                  Text(
-                    winnerText,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: kCream, fontSize: 16, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 22),
-                  Container(
-                    decoration: BoxDecoration(
-                      color: const Color(0xDB061E12),
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(color: Colors.white12),
-                    ),
-                    child: Column(
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 430),
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(18, 24, 18, 28),
                       children: [
-                        for (int position = 0; position < order.length; position++)
-                          Container(
-                            margin: const EdgeInsets.all(6),
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-                            decoration: BoxDecoration(
-                              color: position == 0 ? const Color(0x443F8C2D) : Colors.black26,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: position == 0 ? kGold : Colors.white10),
+                        if (coinPayout != null)
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Text(
+                                'SPIELER 1 • ${coinPayout! > 0 ? 'GEWINN' : 'KEIN GEWINN'}\n'
+                                'Auszahlung: $coinPayout Münzen • Einsatz: $entryFee\n'
+                                'Guthaben: ${TestWallet.instance.coins} Münzen',
+                                textAlign: TextAlign.center,
+                              ),
                             ),
-                            child: Row(
-                              children: [
-                                SizedBox(
-                                  width: 30,
-                                  child: Text(
-                                    position == 0 ? '👑' : '${position + 1}.',
-                                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+                          ),
+                        const Text(
+                          'GRATULATION!',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: kNeon,
+                            fontSize: 27,
+                            fontWeight: FontWeight.w900,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        const Center(
+                          child: Text('👑', style: TextStyle(fontSize: 78)),
+                        ),
+                        const Text(
+                          'GRASKÖNIG',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 42,
+                            fontWeight: FontWeight.w900,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                        const SizedBox(height: 7),
+                        Text(
+                          winnerText,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: kCream,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 22),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: const Color(0xDB061E12),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          child: Column(
+                            children: [
+                              for (
+                                int position = 0;
+                                position < order.length;
+                                position++
+                              )
+                                Container(
+                                  margin: const EdgeInsets.all(6),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 9,
                                   ),
-                                ),
-                                CircleAvatar(
-                                  radius: 14,
-                                  backgroundColor: playerAccent(order[position]),
-                                  child: const Icon(Icons.person, color: Colors.black87, size: 17),
-                                ),
-                                const SizedBox(width: 9),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                  decoration: BoxDecoration(
+                                    color: position == 0
+                                        ? const Color(0x443F8C2D)
+                                        : Colors.black26,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: position == 0
+                                          ? kGold
+                                          : Colors.white10,
+                                    ),
+                                  ),
+                                  child: Row(
                                     children: [
-                                      Text(players[order[position]], style: const TextStyle(fontWeight: FontWeight.w900)),
+                                      SizedBox(
+                                        width: 30,
+                                        child: Text(
+                                          position == 0
+                                              ? '👑'
+                                              : '${position + 1}.',
+                                          style: const TextStyle(
+                                            fontSize: 20,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                        ),
+                                      ),
+                                      CircleAvatar(
+                                        radius: 14,
+                                        backgroundColor: playerAccent(
+                                          order[position],
+                                        ),
+                                        child: const Icon(
+                                          Icons.person,
+                                          color: Colors.black87,
+                                          size: 17,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 9),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              players[order[position]],
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w900,
+                                              ),
+                                            ),
+                                            Text(
+                                              '${roundWins[order[position]]}× beste Plantage',
+                                              style: const TextStyle(
+                                                fontSize: 9,
+                                                color: Colors.white54,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                       Text(
-                                        '${roundWins[order[position]]}× beste Plantage',
-                                        style: const TextStyle(fontSize: 9, color: Colors.white54),
+                                        '${totalScores[order[position]]}',
+                                        style: TextStyle(
+                                          fontSize: position == 0 ? 24 : 19,
+                                          fontWeight: FontWeight.w900,
+                                          color: position == 0
+                                              ? kGold
+                                              : Colors.white,
+                                        ),
                                       ),
                                     ],
                                   ),
                                 ),
-                                Text(
-                                  '${totalScores[order[position]]}',
-                                  style: TextStyle(
-                                    fontSize: position == 0 ? 24 : 19,
-                                    fontWeight: FontWeight.w900,
-                                    color: position == 0 ? kGold : Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ),
+                            ],
                           ),
+                        ),
+                        const SizedBox(height: 18),
+                        SizedBox(
+                          height: 54,
+                          child: FilledButton(
+                            onPressed: () {
+                              Navigator.of(context).pushAndRemoveUntil(
+                                MaterialPageRoute(
+                                  builder: (_) => const StartScreen(),
+                                ),
+                                (route) => false,
+                              );
+                            },
+                            child: const Text('NEUES SPIEL'),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          height: 48,
+                          child: OutlinedButton(
+                            onPressed: () {
+                              Navigator.of(context).pushAndRemoveUntil(
+                                MaterialPageRoute(
+                                  builder: (_) => const StartScreen(),
+                                ),
+                                (route) => false,
+                              );
+                            },
+                            child: const Text('HAUPTMENÜ'),
+                          ),
+                        ),
                       ],
                     ),
                   ),
-                  const SizedBox(height: 18),
-                  SizedBox(
-                    height: 54,
-                    child: FilledButton(
-                      onPressed: () {
-                        Navigator.of(context).pushAndRemoveUntil(
-                          MaterialPageRoute(builder: (_) => const StartScreen()),
-                          (route) => false,
-                        );
-                      },
-                      child: const Text('NEUES SPIEL'),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 48,
-                    child: OutlinedButton(
-                      onPressed: () {
-                        Navigator.of(context).pushAndRemoveUntil(
-                          MaterialPageRoute(builder: (_) => const StartScreen()),
-                          (route) => false,
-                        );
-                      },
-                      child: const Text('HAUPTMENÜ'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+                ),
               ),
             ),
           ),
           const Positioned.fill(
-            child: IgnorePointer(
-              child: ConfettiCelebration(),
-            ),
+            child: IgnorePointer(child: ConfettiCelebration()),
           ),
         ],
       ),
@@ -4243,12 +5536,22 @@ class MenuButton extends StatelessWidget {
           ? FilledButton.icon(
               onPressed: onTap,
               icon: Icon(icon, size: 24),
-              label: Text(label, style: const TextStyle(fontSize: 17, letterSpacing: 0.4)),
+              label: Text(
+                label,
+                style: const TextStyle(fontSize: 17, letterSpacing: 0.4),
+              ),
             )
           : OutlinedButton.icon(
               onPressed: onTap,
               icon: Icon(icon, size: 22),
-              label: Text(label, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: 0.4)),
+              label: Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.4,
+                ),
+              ),
             ),
     );
   }
@@ -4274,7 +5577,12 @@ class SectionPanel extends StatelessWidget {
         children: [
           Text(
             title,
-            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: kCream, letterSpacing: 0.8),
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+              color: kCream,
+              letterSpacing: 0.8,
+            ),
           ),
           const SizedBox(height: 10),
           child,
@@ -4289,7 +5597,12 @@ class ModeRow extends StatelessWidget {
   final String title;
   final String subtitle;
 
-  const ModeRow({super.key, required this.selected, required this.title, required this.subtitle});
+  const ModeRow({
+    super.key,
+    required this.selected,
+    required this.title,
+    required this.subtitle,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -4311,8 +5624,14 @@ class ModeRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
-                Text(subtitle, style: const TextStyle(fontSize: 10, color: Colors.white54)),
+                Text(
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.w900),
+                ),
+                Text(
+                  subtitle,
+                  style: const TextStyle(fontSize: 10, color: Colors.white54),
+                ),
               ],
             ),
           ),
@@ -4356,7 +5675,8 @@ class _PulseScaleState extends State<PulseScale>
   @override
   void didUpdateWidget(covariant PulseScale oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.active != widget.active || oldWidget.duration != widget.duration) {
+    if (oldWidget.active != widget.active ||
+        oldWidget.duration != widget.duration) {
       _controller.duration = widget.duration;
       _syncAnimation();
     }
@@ -4383,7 +5703,8 @@ class _PulseScaleState extends State<PulseScale>
       animation: _controller,
       child: widget.child,
       builder: (context, child) {
-        final scale = widget.minScale +
+        final scale =
+            widget.minScale +
             (widget.maxScale - widget.minScale) * _controller.value;
         return Transform.scale(scale: scale, child: child);
       },
@@ -4455,7 +5776,8 @@ class ConfettiPainter extends CustomPainter {
       final angle = progress * 8 + random.nextDouble() * pi;
       final w = 5.0 + random.nextDouble() * 5;
       final h = 8.0 + random.nextDouble() * 8;
-      final paint = Paint()..color = colors[i % colors.length].withOpacity(0.85);
+      final paint = Paint()
+        ..color = colors[i % colors.length].withOpacity(0.85);
 
       canvas.save();
       canvas.translate(x + sway, y);
@@ -4499,39 +5821,55 @@ class LeafPatternPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = const Color(0x1028A848);
-    final stemPaint = Paint()
-      ..color = const Color(0x0D7EE68E)
-      ..strokeWidth = 2
+    // Seven serrated leaflets form a recognizable hemp leaf, like the back.
+    // Fixed spacing keeps the pattern visible on both phones and wide screens.
+    const spacing = 150.0;
+    final fill = Paint();
+    final vein = Paint()
+      ..color = const Color(0x553C8659)
+      ..strokeWidth = 1.1
       ..style = PaintingStyle.stroke;
 
-    final points = <Offset>[
-      Offset(size.width * .08, size.height * .10),
-      Offset(size.width * .78, size.height * .08),
-      Offset(size.width * .94, size.height * .28),
-      Offset(size.width * .15, size.height * .42),
-      Offset(size.width * .72, size.height * .50),
-      Offset(size.width * .07, size.height * .72),
-      Offset(size.width * .87, size.height * .80),
-      Offset(size.width * .38, size.height * .92),
-    ];
-
-    for (int i = 0; i < points.length; i++) {
-      final p = points[i];
-      final angle = (i % 4) * .7;
-      canvas.save();
-      canvas.translate(p.dx, p.dy);
-      canvas.rotate(angle);
-      canvas.drawLine(const Offset(0, -24), const Offset(0, 28), stemPaint);
-      for (int j = -2; j <= 2; j++) {
-        final y = j * 11.0;
+    for (int row = -1; row * spacing < size.height + spacing; row++) {
+      for (int col = -1; col * spacing < size.width + spacing; col++) {
+        final variant = (row + col) % 3;
+        fill.color = const [
+          Color(0x5530874B),
+          Color(0x44336E46),
+          Color(0x66317C49),
+        ][variant];
         canvas.save();
-        canvas.translate(0, y);
-        canvas.rotate(j.isEven ? .55 : -.55);
-        canvas.drawOval(const Rect.fromLTWH(-5, -13, 10, 26), paint);
+        canvas.translate(
+          col * spacing + (row.isOdd ? spacing / 2 : 0),
+          row * spacing + 55,
+        );
+        canvas.rotate((row * 3 + col * 2) * .47);
+        final scale = .85 + variant * .13;
+        canvas.scale(scale);
+        canvas.drawLine(Offset.zero, const Offset(0, 27), vein);
+        for (int finger = -3; finger <= 3; finger++) {
+          canvas.save();
+          canvas.rotate(finger * .48);
+          final length = 76.0 - finger.abs() * 14;
+          final halfWidth = 10.0 - finger.abs() * 1.5;
+          final blade = Path()..moveTo(0, 0);
+          for (final side in [-1.0, 1.0]) {
+            // Outward teeth alternate with shallow notches on each edge.
+            for (int step = 1; step <= 12; step++) {
+              final t = side < 0 ? step / 13 : (13 - step) / 13;
+              final width = sin(pi * t) * halfWidth;
+              final tooth = step.isEven ? .67 : 1.0;
+              blade.lineTo(side * width * tooth, -length * t);
+            }
+            if (side < 0) blade.lineTo(0, -length);
+          }
+          blade.close();
+          canvas.drawPath(blade, fill);
+          canvas.drawLine(Offset.zero, Offset(0, -length + 5), vein);
+          canvas.restore();
+        }
         canvas.restore();
       }
-      canvas.restore();
     }
   }
 
@@ -4566,43 +5904,36 @@ class DiscardStack extends StatelessWidget {
                 onTap: enabled ? onTake : null,
                 borderRadius: BorderRadius.circular(10),
                 child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                width: 70,
-                height: 104,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF0C2A1A),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: enabled ? kGold : Colors.white24,
-                    width: enabled ? 2 : 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: enabled
-                          ? kGold.withOpacity(0.18)
-                          : Colors.black38,
-                      blurRadius: enabled ? 12 : 8,
-                      offset: const Offset(0, 4),
+                  duration: const Duration(milliseconds: 180),
+                  width: 70,
+                  height: 104,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0C2A1A),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: enabled ? kGold : Colors.white24,
+                      width: enabled ? 2 : 1,
                     ),
-                  ],
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: card == null
-                    ? const Center(
-                        child: Icon(
-                          Icons.layers_clear_outlined,
-                          color: Colors.white24,
-                          size: 30,
-                        ),
-                      )
-                    : card!.assetPath != null
-                        ? Image.asset(
-                            card!.assetPath!,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) =>
-                                CardFallbackLarge(card: card!),
-                          )
-                        : CardFallbackLarge(card: card!),
+                    boxShadow: [
+                      BoxShadow(
+                        color: enabled
+                            ? kGold.withOpacity(0.18)
+                            : Colors.black38,
+                        blurRadius: enabled ? 12 : 8,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: card == null
+                      ? const Center(
+                          child: Icon(
+                            Icons.layers_clear_outlined,
+                            color: Colors.white24,
+                            size: 30,
+                          ),
+                        )
+                      : CardFace(card: card!),
                 ),
               ),
             ),
@@ -4708,15 +6039,35 @@ class CardBackStack extends StatelessWidget {
                 opacity: enabled ? 1 : 0.52,
                 child: Stack(
                   children: [
-                    Positioned(left: 12, top: 0, width: 56, height: 84, child: backCard()),
-                    Positioned(left: 7, top: 4, width: 56, height: 84, child: backCard()),
-                    Positioned(left: 2, top: 8, width: 56, height: 84, child: backCard()),
+                    Positioned(
+                      left: 12,
+                      top: 0,
+                      width: 56,
+                      height: 84,
+                      child: backCard(),
+                    ),
+                    Positioned(
+                      left: 7,
+                      top: 4,
+                      width: 56,
+                      height: 84,
+                      child: backCard(),
+                    ),
+                    Positioned(
+                      left: 2,
+                      top: 8,
+                      width: 56,
+                      height: 84,
+                      child: backCard(),
+                    ),
                     if (enabled)
                       Positioned.fill(
                         child: DecoratedBox(
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: kGold.withValues(alpha: 0.55)),
+                            border: Border.all(
+                              color: kGold.withValues(alpha: 0.55),
+                            ),
                           ),
                         ),
                       ),
@@ -4728,7 +6079,9 @@ class CardBackStack extends StatelessWidget {
         ),
         const SizedBox(height: 3),
         Text(
-          enabled ? 'ZIEHSTAPEL • KARTE ANTIPPEN • $remaining' : 'GEZOGEN • $remaining',
+          enabled
+              ? 'ZIEHSTAPEL • KARTE ANTIPPEN • $remaining'
+              : 'GEZOGEN • $remaining',
           textAlign: TextAlign.center,
           style: TextStyle(
             fontSize: 9.5,
@@ -4759,7 +6112,7 @@ class CardFallbackLarge extends StatelessWidget {
       case CardType.defense:
         return const Color(0xFF1374AA);
       case CardType.action:
-        return const Color(0xFFBC6000);
+        return const Color(0xFFDD278C);
     }
   }
 
@@ -4837,8 +6190,12 @@ class HandFan extends StatelessWidget {
           final count = hand.length;
           final maxWidth = constraints.maxWidth;
           final naturalStep = cardWidth + 8;
-          final fitStep = count <= 1 ? 0.0 : (maxWidth - cardWidth) / (count - 1);
-          final step = count <= 1 ? 0.0 : min(naturalStep, max(minStep, fitStep));
+          final fitStep = count <= 1
+              ? 0.0
+              : (maxWidth - cardWidth) / (count - 1);
+          final step = count <= 1
+              ? 0.0
+              : min(naturalStep, max(minStep, fitStep));
           final totalWidth = cardWidth + step * (count - 1);
           final startLeft = max(0.0, (maxWidth - totalWidth) / 2);
 
@@ -4872,7 +6229,9 @@ class HandFan extends StatelessWidget {
           // dass sich überlappende Karten gegenseitig die Berührung wegnehmen.
           final hitZones = <Widget>[];
           for (int index = 0; index < count; index++) {
-            final visibleWidth = index == count - 1 ? cardWidth : max(step, 44.0);
+            final visibleWidth = index == count - 1
+                ? cardWidth
+                : max(step, 44.0);
             hitZones.add(
               Positioned(
                 left: startLeft + (step * index),
@@ -4914,7 +6273,11 @@ class HandFan extends StatelessWidget {
                           shape: BoxShape.circle,
                           border: Border.all(color: Colors.white38),
                         ),
-                        child: const Icon(Icons.zoom_in_rounded, size: 22, color: Colors.white),
+                        child: const Icon(
+                          Icons.zoom_in_rounded,
+                          size: 22,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
                   ),
@@ -4964,7 +6327,7 @@ class GameCardWidget extends StatelessWidget {
       case CardType.defense:
         return const Color(0xFF1374AA);
       case CardType.action:
-        return const Color(0xFFBC6000);
+        return const Color(0xFFDD278C);
     }
   }
 
@@ -4980,18 +6343,12 @@ class GameCardWidget extends StatelessWidget {
             card.title.toUpperCase(),
             textAlign: TextAlign.center,
             maxLines: 2,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-            ),
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
           ),
           const Spacer(),
           Text(
             card.value,
-            style: const TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w900,
-            ),
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
           ),
           const Spacer(),
           Text(
@@ -5018,60 +6375,50 @@ class GameCardWidget extends StatelessWidget {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
           width: width,
-        transform: selected
-            ? Matrix4.translationValues(0, -8, 0)
-            : Matrix4.identity(),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: selected ? Colors.amber : Colors.white,
-            width: selected ? 4 : 2,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: selected
-                  ? Colors.amber.withOpacity(0.35)
-                  : Colors.black45,
-              blurRadius: selected ? 12 : 6,
+          transform: selected
+              ? Matrix4.translationValues(0, -8, 0)
+              : Matrix4.identity(),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: selected ? Colors.amber : Colors.white,
+              width: selected ? 4 : 2,
             ),
-          ],
-        ),
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(11),
-                child: card.assetPath != null
-                    ? Image.asset(
-                        card.assetPath!,
-                        fit: BoxFit.cover,
-                        width: double.infinity,
-                        height: double.infinity,
-                        errorBuilder: (context, error, stackTrace) {
-                          return fallbackCard();
-                        },
-                      )
-                    : fallbackCard(),
+            boxShadow: [
+              BoxShadow(
+                color: selected
+                    ? Colors.amber.withOpacity(0.35)
+                    : Colors.black45,
+                blurRadius: selected ? 12 : 6,
               ),
-            ),
-            Positioned(
-              top: 6,
-              right: 6,
-              child: Material(
-                color: Colors.black.withOpacity(0.58),
-                shape: const CircleBorder(),
-                child: InkWell(
-                  customBorder: const CircleBorder(),
-                  onTap: onZoom,
-                  child: const Padding(
-                    padding: EdgeInsets.all(7),
-                    child: Icon(Icons.zoom_in, size: 18, color: Colors.white),
+            ],
+          ),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(11),
+                  child: CardFace(card: card),
+                ),
+              ),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Material(
+                  color: Colors.black.withOpacity(0.58),
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: onZoom,
+                    child: const Padding(
+                      padding: EdgeInsets.all(7),
+                      child: Icon(Icons.zoom_in, size: 18, color: Colors.white),
+                    ),
                   ),
                 ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
         ),
       ),
     );
@@ -5133,10 +6480,7 @@ class PlantSlot extends StatelessWidget {
                 key: ValueKey('empty_$title'),
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(
-                    icon,
-                    style: const TextStyle(fontSize: 30),
-                  ),
+                  Text(icon, style: const TextStyle(fontSize: 30)),
                   const SizedBox(height: 7),
                   FittedBox(
                     fit: BoxFit.scaleDown,
@@ -5152,10 +6496,7 @@ class PlantSlot extends StatelessWidget {
               )
             : Padding(
                 key: ValueKey('${card!.title}_${card!.value}_$protected'),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 5,
-                  vertical: 4,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 4),
                 child: Row(
                   children: [
                     if (card!.assetPath != null)
@@ -5164,18 +6505,7 @@ class PlantSlot extends StatelessWidget {
                         height: 72,
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(7),
-                          child: Image.asset(
-                            card!.assetPath!,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              color: const Color(0xFF143824),
-                              alignment: Alignment.center,
-                              child: Text(
-                                icon,
-                                style: const TextStyle(fontSize: 27),
-                              ),
-                            ),
-                          ),
+                          child: CardFace(card: card!),
                         ),
                       )
                     else
@@ -5250,4 +6580,3 @@ class PlantSlot extends StatelessWidget {
     );
   }
 }
-
